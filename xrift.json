@@ -1,8 +1,8 @@
 {
   "world": {
     "distDir": "./dist",
-    "title": "テストワールド",
-    "description": "お試しで作ったワールド",
+    "title": "無限テクノ",
+    "description": "地下クラブで140BPM前後のテクノが無限に生成され続けるワールド。再生ボタンで全員同期して鳴ります。強い点滅があります。",
     "thumbnailPath": "thumbnail.png",
     "buildCommand": "npm run build",
     "ignore": [

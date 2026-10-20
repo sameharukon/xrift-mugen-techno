@@ -11,6 +11,7 @@ const tmp = new PerspectiveCamera() // camera-style lookAt (looks down -z)
 export function DevCamOverride() {
   const scene = useThree((s) => s.scene)
   useEffect(() => {
+    ;(globalThis as Record<string, unknown>).__scene = scene // dev-only: thumbnail capture (hide helpers)
     const prev = scene.onBeforeRender
     scene.onBeforeRender = (renderer, sc, camera, ...rest) => {
       prev.call(scene, renderer, sc, camera, ...rest)
