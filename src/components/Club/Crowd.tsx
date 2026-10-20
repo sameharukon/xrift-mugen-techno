@@ -1,6 +1,6 @@
 import { useFrame } from '@react-three/fiber'
 import { useLayoutEffect, useMemo, useRef } from 'react'
-import { AdditiveBlending, CapsuleGeometry, Color, InstancedMesh, LatheGeometry, Object3D, ShaderMaterial, SphereGeometry, Vector2 } from 'three'
+import { AdditiveBlending, Color, InstancedBufferAttribute, InstancedMesh, LatheGeometry, Object3D, ShaderMaterial, SphereGeometry, Vector2 } from 'three'
 import { beat } from '../../techno/beat'
 import { meter } from './index'
 
@@ -8,13 +8,15 @@ import { meter } from './index'
 /**
  * "人間の輪郭がぼんやりあるもや": additive, depthWrite off (no sorting issues across instances),
  * fresnel rim → soft glowing edges with a see-through core, time-scrolled 3D value-noise fbm → wispy drift.
- * Two layers on body + head (core + inflated faint halo; arms core only) blur the outline. Colour follows the rig:
+ * Two layers on body + head (core + inflated faint halo) blur the outline; per-figure phase / speed / scale. Colour follows the rig:
  * pale cold white rim + white hits from behind, deep red from the floor pulse below. 0 when lit = 0.
  */
 const MIST_VERT = /* glsl */ `
 uniform float uInflate;
 uniform float uTime;
 uniform float uWaver;
+/** per figure: x = noise phase offset, y = drift speed ×, z = noise scale × (no two figures waver alike) */
+attribute vec3 aMist;
 varying vec3 vN;
 varying vec3 vWP;
 varying float vH;
@@ -31,11 +33,12 @@ void main() {
   vec4 wp = m * vec4(position, 1.0);
   // ---- wavering outline (smoke / heat haze): noise displacement mostly along the normal ----
   // per-instance phase from the instance position; field scrolls upward (rising flow)
-  vec3 seed = vec3(instanceMatrix[3].x * 1.7, 0.0, instanceMatrix[3].z * 1.3);
+  vec3 seed = vec3(instanceMatrix[3].x * 1.7, 0.0, instanceMatrix[3].z * 1.3) + aMist.x * vec3(7.3, 3.1, 5.9);
   float up = clamp(wp.y / 1.75, 0.0, 1.0);
-  vec3 q = wp.xyz * vec3(2.6, 1.6, 2.6) + seed + vec3(0.0, -uTime * 0.55, uTime * 0.08);
+  float tm = uTime * aMist.y;
+  vec3 q = wp.xyz * vec3(2.6, 1.6, 2.6) * aMist.z + seed + vec3(0.0, -tm * 0.55, tm * 0.08);
   float d = vnoiseV(q) * 0.65 + vnoiseV(q * 2.1 + 4.3) * 0.35;      // 0..1
-  float d2 = vnoiseV(q * 0.7 + vec3(9.1, -uTime * 0.25, 2.7));      // slow, large-scale sway
+  float d2 = vnoiseV(q * 0.7 + vec3(9.1, -tm * 0.25, 2.7));      // slow, large-scale sway
   // stronger at the silhouette (normal ⟂ view) and towards the upper body; feet stay planted
   vec3 toCam = normalize(cameraPosition - wp.xyz);
   float edge = 1.0 - abs(dot(n, toCam));
@@ -121,8 +124,9 @@ function mistMaterial(layer: 0 | 1) {
 }
 
 /**
- * NPC crowd: dark low-poly silhouettes (3 instanced draw calls total: bodies, heads, arms).
- * Driven only by the shared beat (same timeline for everyone) — no extra synced state.
+ * NPC crowd: mist silhouettes without arms (4 instanced draw calls: bodies + heads, core + halo layer).
+ * Driven by the shared beat clock only — no extra synced state. Every figure has its own deterministic dance
+ * "personality" (style, timing, amplitude, wandering intensity, section response, idle motion).
  */
 export interface CrowdFigure {
   x: number
@@ -130,7 +134,7 @@ export interface CrowdFigure {
   /** yaw target (they face this point) */
   lookX?: number
   lookZ?: number
-  /** the DJ: hands on the decks, nods hardest */
+  /** the DJ: leans over the decks, nods on the beat */
   dj?: boolean
 }
 
@@ -160,7 +164,7 @@ export function crowdLayout(): CrowdFigure[] {
     for (let r = 0; r < 3; r++)
       for (let c = 0; c < 2; c++) add(side * (2.5 + c * 0.75), -0.9 + r * 0.85)
   // in front of the booth: two arcs closing the ring (facing the DJ). Keeps a ~1.4 m clear gap in front of
-  // the table (front edge z = 0.6) where players spawn / reach the Play button.
+  // the table (front edge z = 0.6) for players.
   const arc = (r: number, n: number, deg: number) => {
     for (let k = 0; k < n; k++) {
       const th = ((-deg + (2 * deg * k) / (n - 1)) * Math.PI) / 180
@@ -174,27 +178,95 @@ export function crowdLayout(): CrowdFigure[] {
 
 const tmp = new Object3D()
 const head = new Object3D()
-const armL = new Object3D()
-const armR = new Object3D()
-tmp.add(head, armL, armR)
+tmp.add(head)
+// yaw first, then pitch / roll in the figure's own frame (lean = towards where it faces)
+tmp.rotation.order = 'YXZ'
+
+/** dance styles (weights below): how a figure moves to the music */
+const STYLES = ['bounce', 'nod', 'shift', 'sway', 'stand', 'half', 'step'] as const
+type Style = (typeof STYLES)[number]
+const STYLE_W = [0.22, 0.2, 0.17, 0.13, 0.1, 0.1, 0.08]
+
+interface Persona {
+  style: Style
+  /** timing offset in beats (on / lagging 50–150 ms / offbeat / slightly ahead), lag in ms resolved per bpm */
+  lagMs: number
+  off: number
+  amp: number
+  /** dip sharpness (higher = snappier) */
+  sharp: number
+  scale: number
+  yaw: number
+  /** intensity wander: two slow sines per figure */
+  wf: [number, number, number, number]
+  /** pauses: slow noise frequency / phase / threshold */
+  pf: number
+  pp: number
+  pth: number
+  /** section response: groove follow rate (1/s), drop reaction strength, its decay (1/s) */
+  rate: number
+  drop: number
+  dropDecay: number
+  /** idle: breathing rate / phase, body yaw drift, head turn */
+  br: number
+  bp: number
+  yf: number
+  yp: number
+  hf: number
+  hp: number
+  /** step-in-place / drift */
+  stepW: number
+}
+
+function persona(i: number, f: CrowdFigure): Persona {
+  const h = (k: number) => hash(i, 20 + k)
+  let x = h(0) * STYLE_W.reduce((a, b) => a + b, 0), si = 0
+  while (si < STYLES.length - 1 && (x -= STYLE_W[si]) > 0) si++
+  const t = h(1)
+  const timing = t < 0.5 ? { lagMs: 0, off: 0 } : t < 0.8 ? { lagMs: 50 + 100 * h(2), off: 0 } : t < 0.92 ? { lagMs: 0, off: 0.5 } : { lagMs: -(15 + 25 * h(2)), off: 0 }
+  return {
+    style: f.dj ? 'nod' : STYLES[si],
+    ...(f.dj ? { lagMs: 0, off: 0 } : timing),
+    amp: f.dj ? 1.0 : 0.55 + 0.75 * h(3),
+    sharp: 4 + 5 * h(4),
+    scale: f.dj ? 1.0 : 0.92 + 0.16 * hash(i, 5),
+    yaw: Math.atan2((f.lookX ?? 0) - f.x, (f.lookZ ?? 0) - f.z) + (hash(i, 6) - 0.5) * 0.6,
+    wf: [0.025 + 0.06 * h(5), h(6) * 6.28, 0.07 + 0.09 * h(7), h(8) * 6.28],
+    pf: 0.02 + 0.04 * h(9),
+    pp: h(10) * 6.28,
+    pth: f.dj ? -2 : 0.55 + 0.35 * h(11),
+    rate: 0.25 + 2.5 * h(12) * h(12),
+    drop: f.dj ? 0.6 : h(13) < 0.3 ? 0.8 + 0.4 * h(14) : 0.15 * h(14),
+    dropDecay: 0.2 + 0.6 * h(15),
+    br: 0.22 + 0.12 * h(16),
+    bp: h(17) * 6.28,
+    yf: 0.05 + 0.1 * h(18),
+    yp: h(19) * 6.28,
+    hf: 0.04 + 0.07 * h(20),
+    hp: h(21) * 6.28,
+    stepW: 0.03 + 0.04 * h(22),
+  }
+}
+
+/** kick-locked dip: sharp drop at the beat, smooth recovery (x = beat phase 0..1) */
+const dipAt = (x: number, k: number) => Math.exp(-x * k) - Math.exp(-k)
+const fr = (v: number) => ((v % 1) + 1) % 1
 
 export const Crowd: React.FC<{ figures?: CrowdFigure[] }> = ({ figures }) => {
   const list = useMemo(() => figures ?? crowdLayout(), [figures])
   const N = list.length
   const bodies = useRef<InstancedMesh>(null)
   const heads = useRef<InstancedMesh>(null)
-  const arms = useRef<InstancedMesh>(null)
   const bodies2 = useRef<InstancedMesh>(null)
   const heads2 = useRef<InstancedMesh>(null)
-    const mats = useMemo(() => [mistMaterial(0), mistMaterial(1)], [])
+  const mats = useMemo(() => [mistMaterial(0), mistMaterial(1)], [])
   // crowd white flash: own envelope, re-triggered at most every 250 ms (≤ 4 Hz) on rising rig hits
   const white = useRef({ v: 0, last: -1e9, prev: 0 })
-  const hands = useRef(0)
-  const lastDrop = useRef(0)
+  // beat clock: 16th-step counter of the heard events + time since the last step
+  const clk = useRef({ step: -1, at: 0 })
 
   const geo = useMemo(() => {
     // lathe profile: feet → hips → waist → shoulders → neck (scaled flat in z → broad shoulders)
-    // softer, rounder profile (fewer hard corners → reads as a vague outline in the mist)
     const prof = [[0.01, 0], [0.12, 0.03], [0.13, 0.4], [0.17, 0.8], [0.165, 1.0], [0.21, 1.22], [0.22, 1.34], [0.17, 1.43], [0.07, 1.47], [0.055, 1.53]]
     // resample the profile to ~even 9 cm steps → enough vertices for a smooth wavering silhouette
     const pts: Vector2[] = []
@@ -209,28 +281,29 @@ export const Crowd: React.FC<{ figures?: CrowdFigure[] }> = ({ figures }) => {
     body.computeVertexNormals()
     const h = new SphereGeometry(0.12, 9, 7)
     h.scale(1, 1.12, 1)
-    const a = new CapsuleGeometry(0.045, 0.52, 2, 6, 4) // 4 length segments → smooth arm deformation
-    a.translate(0, -0.3, 0) // pivot at the shoulder
-    return { body, h, a }
-  }, [])
+    // per-figure mist variation (shared by both layers: same instance order)
+    const mist = new Float32Array(N * 3)
+    for (let i = 0; i < N; i++) {
+      mist[i * 3] = hash(i, 40)
+      mist[i * 3 + 1] = 0.65 + 0.7 * hash(i, 41)
+      mist[i * 3 + 2] = 0.8 + 0.45 * hash(i, 42)
+    }
+    body.setAttribute('aMist', new InstancedBufferAttribute(mist, 3))
+    h.setAttribute('aMist', new InstancedBufferAttribute(mist, 3))
+    return { body, h }
+  }, [N])
 
-  const params = useMemo(() => list.map((f, i) => ({
-    phase: hash(i, 3) * 0.18 - 0.09, // slight timing spread around the kick
-    amp: f.dj ? 1.2 : 0.45 + 0.6 * hash(i, 4),
-    scale: f.dj ? 1.0 : 0.92 + 0.16 * hash(i, 5),
-    yaw: Math.atan2((f.lookX ?? 0) - f.x, (f.lookZ ?? 0) - f.z) + (hash(i, 6) - 0.5) * 0.6,
-    raiser: !f.dj && hash(i, 7) < 0.4,
-    oneArm: hash(i, 8) < 0.5,
-    sway: hash(i, 9) * Math.PI * 2,
-  })), [list])
+  const P = useMemo(() => list.map((f, i) => persona(i, f)), [list])
+  // per-figure dynamic state: followed groove level, drop excitement, step side
+  const dyn = useMemo(() => list.map(() => ({ g: 0, ex: 0 })), [list])
 
   useLayoutEffect(() => {
-    for (const m of [bodies.current, heads.current, arms.current, bodies2.current, heads2.current]) if (m) m.frustumCulled = false
+    for (const m of [bodies.current, heads.current, bodies2.current, heads2.current]) if (m) m.frustumCulled = false
   }, [])
 
   useFrame((_, delta) => {
-    const B = bodies.current, H = heads.current, A = arms.current
-    if (!B || !H || !A) return
+    const B = bodies.current, H = heads.current
+    if (!B || !H) return
     // ---- mist uniforms ----
     const W = white.current
     const now = performance.now()
@@ -249,46 +322,56 @@ export const Crowd: React.FC<{ figures?: CrowdFigure[] }> = ({ figures }) => {
       m.uniforms.uRed.value = Math.min(1, beat.redHit)
       m.uniforms.uBase.value = 0.08 + 0.05 * beat.energy * (1 - beat.breakAmt) + 0.05 * beat.breakAmt
     }
+    // ---- beat clock (beats), locked to the heard steps ----
     const bpm = beat.bpm || 140
-    const ph = (beat.time * bpm) / 60
-    const groove = beat.lit * (1 - beat.breakAmt)
-    // hands up after a drop, fading over ~8 s
-    if (beat.dropFlash > 0.9 && performance.now() - lastDrop.current > 2000) { hands.current = 1; lastDrop.current = performance.now() }
-    hands.current = Math.max(0, hands.current - delta / 8)
-    const riserHands = beat.riser > 0.7 ? (beat.riser - 0.7) / 0.3 : 0
+    const s16ms = 15000 / bpm
+    const C = clk.current
+    if (beat.step !== C.step) { C.step = beat.step; C.at = now }
+    const beats = (Math.max(0, C.step) + Math.min(1.5, (now - C.at) / s16ms)) / 4
+    const T = now / 1000
+    const target = beat.lit * (1 - beat.breakAmt) * (0.55 + 0.6 * beat.energy)
+    const dt = Math.min(0.1, delta)
     for (let i = 0; i < N; i++) {
-      const f = list[i], p = params[i]
-      // bounce: sharp down-beat dip (kick), smooth recovery
-      const x = ((ph + p.phase) % 1 + 1) % 1
-      const dip = Math.exp(-x * 6) * groove
-      const sway = Math.sin(beat.time * 0.9 + p.sway) * (0.03 + 0.05 * beat.breakAmt) * beat.lit
-      tmp.position.set(f.x, -0.06 * p.amp * dip, f.z)
-      tmp.rotation.set(0.05 * p.amp * dip, p.yaw + sway, sway * 0.5)
-      tmp.scale.setScalar(p.scale)
-      head.position.set(0, 1.62, 0.02)
-      head.rotation.set((f.dj ? 0.35 : 0.22) * p.amp * dip + (f.dj ? 0.25 : 0), 0, 0)
-      armL.position.set(-0.21, 1.33, 0)
-      armR.position.set(0.21, 1.33, 0)
-      if (f.dj) {
-        // hands forward on the decks, small pumps on the kick
-        armL.rotation.set(-1.05 - 0.1 * dip, 0, -0.12)
-        armR.rotation.set(-1.0 - 0.15 * dip + 0.1 * Math.sin(beat.time * 2), 0, 0.12)
-      } else {
-        const up = p.raiser ? Math.min(1, hands.current * 1.5 + riserHands) : 0
-        const pump = up * 0.25 * dip
-        // rotation.z < 0 swings the left arm outward/up, > 0 the right arm
-        armL.rotation.set(0.08, 0, -(0.12 + up * (p.oneArm ? 0 : 2.6 - pump)))
-        armR.rotation.set(0.08, 0, 0.12 + up * (2.7 - pump))
+      const f = list[i], p = P[i], d = dyn[i]
+      // section response: each figure follows the groove level at its own rate (breaks calm down unevenly)
+      d.g += (target - d.g) * Math.min(1, dt * p.rate)
+      d.ex = Math.max(d.ex * Math.exp(-dt * p.dropDecay), p.drop * beat.dropFlash)
+      // intensity wanders slowly; occasional pauses (stillness)
+      const wander = 0.6 + 0.25 * Math.sin(T * p.wf[0] * 6.283 + p.wf[1]) + 0.15 * Math.sin(T * p.wf[2] * 6.283 + p.wf[3])
+      const pause = 1 - smooth01((Math.sin(T * p.pf * 6.283 + p.pp) * 0.5 + 0.5 - p.pth) / 0.12)
+      const I = Math.max(0, d.g * wander * pause * p.amp + 0.5 * d.ex) * beat.lit
+      // timing: own lag / offbeat; half-timers move on every other beat
+      const b = beats - (p.lagMs * bpm) / 60000 + p.off
+      const x1 = fr(b), x2 = fr(b / 2)
+      const dip = p.style === 'half' ? dipAt(x2, p.sharp * 0.6) : dipAt(x1, p.sharp)
+      let y = 0, pitch = 0, roll = 0, sx = 0, sz = 0, nod = 0, yawD = 0
+      switch (p.style) {
+        case 'bounce': y = -0.07 * dip; pitch = 0.06 * dip; nod = 0.18 * dip; break
+        case 'nod': y = -0.012 * dip; pitch = 0.015 * dip; nod = (f.dj ? 0.32 : 0.26) * dip; break
+        case 'shift': { const w = Math.sin(Math.PI * b); sx = 0.05 * w; roll = -0.06 * w; y = -0.025 * Math.abs(w) * dip; nod = 0.08 * dip; break }
+        case 'sway': { const w = Math.sin((Math.PI * b) / 2); sx = 0.035 * w; roll = -0.08 * w; yawD = 0.1 * w; nod = 0.05 * dip; break }
+        case 'stand': nod = 0.04 * dip; break
+        case 'half': y = -0.06 * dip; pitch = 0.05 * dip; nod = 0.2 * dip; break
+        case 'step': { const w = Math.sin(Math.PI * b); sx = p.stepW * w; y = -0.03 * dip; roll = -0.04 * w; yawD = 0.2 * Math.sin(T * 0.05 + p.yp); nod = 0.1 * dip; break }
       }
+      // idle, independent of the beat: breathing, slow body rotation, head turns
+      const breath = Math.sin(T * p.br * 6.283 + p.bp)
+      const yawIdle = 0.07 * Math.sin(T * p.yf * 6.283 + p.yp) + 0.04 * Math.sin(T * p.yf * 2.7 + p.bp)
+      const hs = Math.sin(T * p.hf * 6.283 + p.hp)
+      const headTurn = 0.4 * hs * hs * hs + 0.06 * Math.sin(T * 0.37 + p.hp)
+      const s = p.scale
+      const lean = f.dj ? 0.22 : 0
+      tmp.position.set(f.x + I * sx * Math.cos(p.yaw), I * y, f.z - I * sx * Math.sin(p.yaw) + I * sz)
+      tmp.rotation.set(lean + I * pitch + 0.006 * breath, p.yaw + yawIdle + I * yawD, I * roll)
+      tmp.scale.set(s, s * (1 + 0.007 * breath), s)
+      head.position.set(0, 1.62, 0.02)
+      head.rotation.set((f.dj ? 0.2 : 0) + I * nod + 0.02 * breath, headTurn * (f.dj ? 0.3 : 1), 0)
       tmp.updateMatrixWorld(true)
       B.setMatrixAt(i, tmp.matrixWorld)
       H.setMatrixAt(i, head.matrixWorld)
-      A.setMatrixAt(i * 2, armL.matrixWorld)
-      A.setMatrixAt(i * 2 + 1, armR.matrixWorld)
     }
     B.instanceMatrix.needsUpdate = true
     H.instanceMatrix.needsUpdate = true
-    A.instanceMatrix.needsUpdate = true
     // halo layer shares the same instance matrices
     for (const [src, dst] of [[B, bodies2.current], [H, heads2.current]] as const) {
       if (!dst) continue
@@ -301,9 +384,10 @@ export const Crowd: React.FC<{ figures?: CrowdFigure[] }> = ({ figures }) => {
     <group>
       <instancedMesh ref={bodies} args={[geo.body, mats[0], N]} renderOrder={2} />
       <instancedMesh ref={heads} args={[geo.h, mats[0], N]} renderOrder={2} />
-      <instancedMesh ref={arms} args={[geo.a, mats[0], N * 2]} renderOrder={2} />
       <instancedMesh ref={bodies2} args={[geo.body, mats[1], N]} renderOrder={3} />
       <instancedMesh ref={heads2} args={[geo.h, mats[1], N]} renderOrder={3} />
     </group>
   )
 }
+
+const smooth01 = (v: number) => { const x = Math.min(1, Math.max(0, v)); return x * x * (3 - 2 * x) }
