@@ -1,9 +1,13 @@
 import { SpawnPoint } from '@xrift/world-components'
 import { RigidBody } from '@react-three/rapier'
-import { useMemo } from 'react'
+import { useMemo, useRef } from 'react'
+import { useFrame } from '@react-three/fiber'
+import type { Group } from 'three'
+import { club } from './techno/club'
 import { DJBooth, type PAStack } from './components/DJBooth'
 import { FloorGlow, LightRig, SceneBackground, SceneFog, TubeWall, useConcrete } from './components/Club'
 import { Crowd } from './components/Club/Crowd'
+import { Entrance } from './components/Club/Entrance'
 import { Ceiling, TripodCamera } from './components/Club/Props'
 import { brickTexture } from './components/Club/textures'
 import { COLORS, ROOM } from './constants'
@@ -16,13 +20,23 @@ export interface WorldProps {
 
 /**
  * Small, low basement club: booth in the middle of the crowd, crowd packed behind the DJ facing the
- * "camera" side (+z), where players spawn. Pitch black until the music plays.
+ * "camera" side (+z). Players spawn outside, in a short corridor behind the back wall, and enter through
+ * a heavy door; the music runs forever (clock-derived), the club is black until you are inside.
  */
 /** 4 PA stacks against the side walls (front pair by the booth, fill pair towards the spawn), aimed at the floor centre */
 const PA_STACKS: PAStack[] = ([[-1, -1.3], [1, -1.3], [-1, 3.0], [1, 3.0]] as const).map(([side, z]) => {
   const x = side * (ROOM.width / 2 - 0.6)
   return { position: [x, 0, z] as [number, number, number], yaw: Math.atan2(-x, 1 - z), side: side < 0 ? 'L' : 'R' }
 })
+
+/** the club interior is not drawn while this user stands outside behind the closed door (saves ~40 draw calls) */
+const CullWhileClosed: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+  const g = useRef<Group>(null)
+  useFrame(() => {
+    if (g.current) g.current.visible = club.door > 0 || club.outside < 0.999
+  })
+  return <group ref={g}>{children}</group>
+}
 
 export const World: React.FC<WorldProps> = ({ position = [0, 0, 0], scale = 1 }) => {
   const { width, zMin, zMax, height, wall } = ROOM
@@ -49,7 +63,6 @@ export const World: React.FC<WorldProps> = ({ position = [0, 0, 0], scale = 1 })
       {([
         [[width / 2 + wall / 2, height / 2, zc], [wall, height, depth], brickSide],
         [[-width / 2 - wall / 2, height / 2, zc], [wall, height, depth], brickSide],
-        [[0, height / 2, zMax + wall / 2], [width, height, wall], brickEnd],
         [[0, height / 2, zMin - wall / 2], [width, height, wall], brickEnd],
       ] as const).map(([p, s, map], i) => (
         <RigidBody key={i} type="fixed" colliders="cuboid" restitution={0} friction={0}>
@@ -67,6 +80,7 @@ export const World: React.FC<WorldProps> = ({ position = [0, 0, 0], scale = 1 })
       <Ceiling width={width} zMin={zMin} zMax={zMax} height={height} map={ceilMap} />
 
       {/* ========== DJブース（人の中心）・クラウド・照明（全員で同期） ========== */}
+      <CullWhileClosed>
       <DJBooth position={[0, 0, 0]} pa={PA_STACKS} />
       <Crowd />
       {/* back wall tubes behind the crowd → silhouettes */}
@@ -76,9 +90,13 @@ export const World: React.FC<WorldProps> = ({ position = [0, 0, 0], scale = 1 })
       {/* red kick light from booth/truss height behind the DJ (backlights heads & shoulders); only a small, faint pool on the floor */}
       <FloorGlow position={[0, 0, -1.4]} size={3} distance={4.5} lightHeight={2.5} peak={14} poolMax={0.18} />
       <TripodCamera position={[1.2, 0, 1.5]} yaw={Math.atan2(1.2, 1.5 + 0.95)} />
+      </CullWhileClosed>
       {import.meta.env.DEV && <DevCamOverride />}
 
-      {/* ========== スポーン（ブースと正面のカメラ側） ========== */}
+      {/* ========== 入口（クラブの外の短い通路と重い鉄扉。扉を開けると音と光が入る） ========== */}
+      <Entrance zMax={zMax} wall={wall} roomWidth={width} roomHeight={height} length={ROOM.corridorLength} />
+
+      {/* ========== スポーン（扉の前の暗い通路） ========== */}
       <group position={[0, 0, ROOM.spawnZ]}>
         <SpawnPoint />
       </group>

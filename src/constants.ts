@@ -5,8 +5,10 @@ export const ROOM = {
   zMax: 6.0,
   height: 3.1,
   wall: 0.3,
-  /** just inside the crowd ring, in the clear gap in front of the booth (button ≈ 1.7 m ahead) */
-  spawnZ: 2.1,
+  /** entrance corridor behind the back wall (z = zMax + wall .. + corridorLength) */
+  corridorLength: 3.6,
+  /** spawn in the corridor, ≈ 2.8 m in front of the door, facing it (−z) */
+  spawnZ: 6.0 + 0.3 + 3.6 - 0.7,
 } as const
 
 export const COLORS = {

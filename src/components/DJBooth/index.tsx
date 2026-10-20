@@ -1,13 +1,14 @@
-import { Interactable, useInstanceState, useServerClock } from '@xrift/world-components'
+import { useServerClock } from '@xrift/world-components'
 import { RigidBody } from '@react-three/rapier'
-import { useFrame } from '@react-three/fiber'
+import { useFrame, useThree } from '@react-three/fiber'
 import { useCallback, useEffect, useRef } from 'react'
 import { Group, Mesh, MeshBasicMaterial, MeshStandardMaterial, Vector3 } from 'three'
 import { BANDS } from '../../techno/engine'
 import { useConcrete } from '../Club'
 import { beat } from '../../techno/beat'
 import { buildClubPA, type ClubPA } from '../../techno/clubPA'
-import { FIXED_BAND, IDLE_SESSION, SyncedTechno, newSession, type DJEvent, type DJSession } from '../../techno/sync'
+import { FIXED_BAND, PerpetualTechno, segIndexAt, segStartMs } from '../../techno/sync'
+import { club } from '../../techno/club'
 
 export interface PAStack {
   /** stack position relative to the booth (floor level) */
@@ -37,14 +38,18 @@ interface AudioRig {
   pa: ClubPA
   analyser: AnalyserNode
   freq: Uint8Array<ArrayBuffer>
-  sync: SyncedTechno
+  sync: PerpetualTechno
+  muffle: BiquadFilterNode
+  muffleGain: GainNode
 }
 
-const STATE_ID = 'techno-dj-session-v1'
-/** max events kept in the shared log (late joiners replay the whole log) */
-const LOG_MAX = 400
-/** a session older than this is treated as stale (e.g. instance state left over after everyone left) */
-const STALE_MS = 3 * 3600 * 1000
+/** closed door: low-pass corner (Hz) and level of the PA as heard from the corridor */
+const MUFFLE_HZ = 160
+const MUFFLE_GAIN = 0.45
+/** fully inside: effectively no filter */
+const OPEN_HZ = 20000
+/** inside but the AudioContext never started: fall back to a clock-driven light grid after this (ms) */
+const NO_AUDIO_FALLBACK_MS = 2500
 
 const tmpA = new Vector3()
 const tmpB = new Vector3()
@@ -54,7 +59,7 @@ function setParam(p: AudioParam | undefined, v: number, t: number) {
   if (p) p.setTargetAtTime(v, t, 0.03)
 }
 
-/** seconds for the world lighting to fade in / out on start / stop */
+/** seconds for the club lighting to fade in when this user enters */
 const FADE_S = 1.0
 
 
@@ -109,21 +114,13 @@ export const DJBooth: React.FC<DJBoothProps> = ({ position = [0, 0, 0], rotation
   const stackRefs = useRef<(Group | null)[]>([])
   const ledMats = useRef<(MeshBasicMaterial | null)[]>([])
   const edgeMats = useRef<MeshBasicMaterial[]>([])
-  const [rawSession, setSession] = useInstanceState<DJSession>(STATE_ID, IDLE_SESSION)
   const clock = useServerClock({ require: 'media' })
-  const session = rawSession.playing && clock.now() - rawSession.t0 > STALE_MS ? { ...rawSession, playing: false } : rawSession
   const clockRef = useRef(clock)
   clockRef.current = clock
-  const sessionRef = useRef(session)
-  sessionRef.current = session
-  const setSessionRef = useRef(setSession)
-  setSessionRef.current = setSession
+  const gl = useThree((s) => s.gl)
 
   const rig = useRef<AudioRig | null>(null)
-  const wantListen = useRef(false)
   const panelMat = useRef<MeshStandardMaterial>(null)
-  const playMat = useRef<MeshStandardMaterial>(null)
-  const ringRef = useRef<Mesh>(null)
   const platters = useRef<(Mesh | null)[]>([])
   const concrete = useConcrete(1)
   const glowMats = useRef<{ m: MeshStandardMaterial; k: number }[]>([])
@@ -131,13 +128,24 @@ export const DJBooth: React.FC<DJBoothProps> = ({ position = [0, 0, 0], rotation
     if (m && !glowMats.current.some((g) => g.m === m)) glowMats.current.push({ m, k })
   }, [])
   const lastKickStep = useRef(-1)
+  const enteredAt = useRef(0)
 
-  // AudioContext is created / resumed only from a user interaction (autoplay policy)
-  const ensureAudio = useCallback(async (): Promise<AudioRig> => {
+  // AudioContext: created lazily and resumed from the first user gesture (autoplay policy);
+  // the perpetual timeline starts as soon as it runs (muffled while the listener is outside)
+  const unlock = useCallback(() => {
     if (!rig.current) {
-      const ctx = new AudioContext({ latencyHint: 'interactive' })
+      let ctx: AudioContext
+      try { ctx = new AudioContext({ latencyHint: 'interactive' }) } catch { return }
+      // muffle stage (closed door): low-pass + level on the whole PA output
+      const muffle = ctx.createBiquadFilter()
+      muffle.type = 'lowpass'
+      muffle.frequency.value = MUFFLE_HZ
+      muffle.Q.value = 0.5
+      const muffleGain = ctx.createGain()
+      muffleGain.gain.value = MUFFLE_GAIN
+      muffle.connect(muffleGain).connect(ctx.destination)
       // club PA: mono low bed + stereo mid/high bed + spatial stacks + basement reverb (see clubPA.ts)
-      const pa = buildClubPA(ctx, paRef.current.map((s) => ({ side: s.side })))
+      const pa = buildClubPA(ctx, paRef.current.map((s) => ({ side: s.side })), {}, muffle)
       const input = pa.input
       const analyser = ctx.createAnalyser()
       analyser.fftSize = 1024
@@ -146,69 +154,56 @@ export const DJBooth: React.FC<DJBoothProps> = ({ position = [0, 0, 0], rotation
       const anaTrim = ctx.createGain()
       anaTrim.gain.value = 0.6 / input.gain.value
       input.connect(anaTrim).connect(analyser)
-      const sync = new SyncedTechno(ctx, input, () => clockRef.current.now())
-      sync.onEnded = (sid) => setSessionRef.current((prev) => (prev.sid === sid && prev.playing ? { ...prev, playing: false } : prev))
-      rig.current = { ctx, input, pa, analyser, freq: new Uint8Array(analyser.frequencyBinCount), sync }
+      const sync = new PerpetualTechno(ctx, input, () => clockRef.current.now() + (import.meta.env.DEV ? Number((globalThis as Record<string, unknown>).__clockSkewMs) || 0 : 0))
+      rig.current = { ctx, input, pa, analyser, freq: new Uint8Array(analyser.frequencyBinCount), sync, muffle, muffleGain }
       if (import.meta.env.DEV) (globalThis as Record<string, unknown>).__techno = rig.current
     }
-    if (rig.current.ctx.state !== 'running') await rig.current.ctx.resume()
-    return rig.current
+    const r = rig.current
+    const go = () => {
+      club.audio = r.ctx.state === 'running'
+      if (club.audio && !r.sync.running) r.sync.start()
+    }
+    if (r.ctx.state !== 'running') r.ctx.resume().then(go, () => undefined)
+    else go()
   }, [])
 
-  // shared state → local engine
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+  // first gesture anywhere (incl. the pointer-lock click) / XR session start → unlock audio
   useEffect(() => {
-    const r = rig.current
-    if (!r) return
-    if (session.playing && wantListen.current && (!r.sync.joined || r.sync.sid !== session.sid)) r.sync.join(session)
-    else r.sync.update(session)
-  }, [rawSession, session.playing])
+    club.unlock = unlock
+    const opts = { capture: true, passive: true } as const
+    const evs = ['pointerdown', 'keydown', 'touchstart', 'mousedown', 'click'] as const
+    for (const e of evs) window.addEventListener(e, unlock, opts)
+    document.addEventListener('pointerlockchange', unlock)
+    const xr = gl.xr as unknown as { addEventListener?: (t: string, f: () => void) => void; removeEventListener?: (t: string, f: () => void) => void }
+    xr.addEventListener?.('sessionstart', unlock)
+    return () => {
+      for (const e of evs) window.removeEventListener(e, unlock, opts)
+      document.removeEventListener('pointerlockchange', unlock)
+      xr.removeEventListener?.('sessionstart', unlock)
+      club.unlock = () => undefined
+    }
+  }, [unlock, gl])
 
   // server clock jumped → re-measure the audio/server offset
   useEffect(() => {
     rig.current?.sync.clockJumped()
   }, [clock.timeJumpCount])
 
-  const appendEvent = useCallback((ev: DJEvent) => {
-    const sid = rig.current?.sync.sid
-    setSessionRef.current((prev) => (prev.playing && prev.sid === sid ? { ...prev, log: [...prev.log, ev].slice(-LOG_MAX) } : prev))
-  }, [])
-
-  const onPlay = useCallback(async () => {
-    const r = await ensureAudio()
-    wantListen.current = true
-    const s = sessionRef.current
-    if (!s.playing) {
-      setSession(newSession(clockRef.current.now()))
-      return
-    }
-    if (!r.sync.joined || r.sync.sid !== s.sid) {
-      // music already running in the instance: join in sync (no restart)
-      r.sync.join(s)
-      return
-    }
-    if (r.sync.isClosing) {
-      // second stop while closing → immediate stop for everyone
-      setSession((prev) => (prev.sid === s.sid ? { ...prev, playing: false } : prev))
-    } else {
-      appendEvent(r.sync.makeEvent('stop'))
-    }
-  }, [ensureAudio, setSession, appendEvent])
-
   // dev-only test hooks (stripped from production builds)
   useEffect(() => {
     if (!import.meta.env.DEV) return
     const g = globalThis as Record<string, unknown>
-    g.__technoPlay = onPlay
-    g.__technoSession = () => sessionRef.current
     g.__beat = beat
-    return () => { delete g.__technoPlay; delete g.__technoSession; delete g.__beat }
-  }, [onPlay])
+    g.__club = club
+    g.__unlock = unlock
+    return () => { delete g.__beat; delete g.__club; delete g.__unlock }
+  }, [unlock])
 
   useEffect(() => {
     return () => {
       const r = rig.current
       rig.current = null
+      club.audio = false
       if (!r) return
       r.sync.dispose()
       setTimeout(() => void r.ctx.close().catch(() => undefined), 700)
@@ -217,11 +212,10 @@ export const DJBooth: React.FC<DJBoothProps> = ({ position = [0, 0, 0], rotation
 
   useFrame(({ camera }, delta) => {
     const r = rig.current
-    const s = sessionRef.current
-    const joined = !!r && r.sync.joined
-    const st = r ? r.sync.getState() : null
+    const st = r && r.sync.running ? r.sync.getState() : null
+    const live = !!st && st.status === 'live'
 
-    // ---- spatial audio: panner at the booth, listener at the camera ----
+    // ---- spatial audio: panners at the stacks, listener at the camera; muffled through the door ----
     if (r) {
       const t = r.ctx.currentTime
       const L = r.ctx.listener
@@ -244,6 +238,10 @@ export const DJBooth: React.FC<DJBoothProps> = ({ position = [0, 0, 0], rotation
         if (P.positionX) { setParam(P.positionX, tmpA.x, t); setParam(P.positionY, tmpA.y, t); setParam(P.positionZ, tmpA.z, t) }
         else P.setPosition(tmpA.x, tmpA.y, tmpA.z)
       })
+      // closed door: heavy low-pass (only the kick / bass gets through); open door: opens up as you walk in
+      const m = club.outside * (1 - 0.75 * club.door)
+      r.muffle.frequency.setTargetAtTime(MUFFLE_HZ * Math.pow(OPEN_HZ / MUFFLE_HZ, 1 - m), t, 0.08)
+      r.muffleGain.gain.setTargetAtTime(MUFFLE_GAIN + (1 - MUFFLE_GAIN) * (1 - m), t, 0.08)
     }
 
     // ---- musical events → visual state (released on the audio clock, when they are heard) ----
@@ -258,12 +256,15 @@ export const DJBooth: React.FC<DJBoothProps> = ({ position = [0, 0, 0], rotation
     beat.kickHit *= dk(12)
     const nowMs = performance.now()
     const kickNBefore = beat.kickN
-    if (joined && r && st) {
+    if (club.entered && !enteredAt.current) enteredAt.current = nowMs
+    const srvNow = clockRef.current.now()
+    if (live && r && st) {
       const heard = r.sync.audibleTime()
       const ev = r.sync.events
       let brk = beat.breakAmt > 0.5, riser = 0, energy = beat.energy, tension = beat.tension
       while (ev.length && ev[0].t <= heard) {
         const e = ev.shift()!
+        if (!club.entered) continue // outside: the music runs (muffled), the club stays dark
         beat.step = e.step
         beat.bar = e.bar
         if (e.kick > 0) { beat.kick = Math.min(1, 0.6 + 0.4 * e.kick); beat.kickN++ }
@@ -285,24 +286,24 @@ export const DJBooth: React.FC<DJBoothProps> = ({ position = [0, 0, 0], rotation
       beat.breakAmt += ((brk ? 1 : 0) - beat.breakAmt) * Math.min(1, delta * 3)
       beat.energy += (energy - beat.energy) * Math.min(1, delta * 2)
       beat.tension = tension
-      beat.active = st.status === 'live'
+      beat.active = club.entered
       beat.audible = beat.active
       beat.bpm = st.bpm
-      beat.time = clockRef.current.now() / 1000 - s.t0 / 1000
+      beat.time = (srvNow - segStartMs(st.seg)) / 1000
       r.analyser.getByteFrequencyData(r.freq)
       const n = r.freq.length
       for (let b = 0; b < 16; b++) {
         const lo = Math.floor(Math.pow(n, b / 16)), hi = Math.max(lo + 1, Math.floor(Math.pow(n, (b + 1) / 16)))
-        let m = 0
-        for (let i = lo; i < hi && i < n; i++) m = Math.max(m, r.freq[i])
-        beat.levels[b] = Math.max(0, (m - 60) / 170)
+        let mx = 0
+        for (let i = lo; i < hi && i < n; i++) mx = Math.max(mx, r.freq[i])
+        beat.levels[b] = Math.max(0, (mx - 60) / 170)
       }
-    } else if (s.playing) {
-      // not listening locally: approximate grid from the server clock (start tempo of the band)
-      const bpm = (BANDS[s.band] || BANDS[FIXED_BAND]).start
-      const tt = clockRef.current.now() / 1000 - s.t0 / 1000
+    } else if (club.entered && nowMs - enteredAt.current > NO_AUDIO_FALLBACK_MS) {
+      // inside but no audio (AudioContext blocked / failed): approximate grid from the server clock
+      const bpm = (BANDS[FIXED_BAND] as { start: number }).start
+      const tt = (srvNow - segStartMs(segIndexAt(srvNow))) / 1000
       const step = Math.floor(tt / (60 / bpm / 4))
-      beat.active = tt >= 0
+      beat.active = true
       beat.audible = false
       beat.bpm = bpm
       beat.time = tt
@@ -326,34 +327,15 @@ export const DJBooth: React.FC<DJBoothProps> = ({ position = [0, 0, 0], rotation
 
     if (beat.kickN !== kickNBefore && nowMs - beat.kickHitAt >= 250) { beat.kickHit = 1; beat.kickHitAt = nowMs }
 
-    // ---- master light level: everything except the play button is black unless the music is on ----
+    // ---- master light level: the club is black until this user is inside and the music runs ----
     beat.litRaw = Math.min(1, Math.max(0, beat.litRaw + (beat.active ? 1 : -1) * (delta / FADE_S)))
     beat.lit = beat.litRaw * beat.litRaw * (3 - 2 * beat.litRaw)
-    const L = beat.lit
+    const Lt = beat.lit
 
-    // ---- booth: play button shows the join state without text ----
-    const tnow = performance.now() / 1000
-    const live = joined && st?.status === 'live'
-    const syncing = joined && st?.status === 'syncing'
-    if (playMat.current) {
-      playMat.current.emissiveIntensity = live
-        ? 1.4 + 0.8 * beat.kickHit // solid + kick
-        : syncing
-          ? 0.6 + 0.6 * (Math.sin(tnow * 12) > 0 ? 1 : 0) // quick blink while syncing
-          : s.playing
-            ? 0.25 + 1.3 * (0.5 - 0.5 * Math.cos(tnow * Math.PI)) // slow breathing (0.5 Hz): music is on, click to join
-            : 0.45 // faint glow: stopped (the only visible thing in the dark room)
-      playMat.current.emissive.set(live && st?.closing ? '#c4101c' : '#e8eeff') // cold white; deep red while closing
-    }
-    if (ringRef.current) {
-      const k = live ? 1 + 0.3 * beat.kickHit : s.playing && !joined ? 1 + 0.25 * (0.5 - 0.5 * Math.cos(tnow * Math.PI)) : 1
-      ringRef.current.scale.set(k, k, 1)
-      ;(ringRef.current.material as MeshBasicMaterial).opacity = s.playing ? 0.95 : 0.35
-    }
-    if (panelMat.current) panelMat.current.emissiveIntensity = L * (1 - beat.preDrop) * (0.05 + 4 * beat.kickHit + 2 * beat.dropFlash)
-    for (const m of edgeMats.current) m.color.setRGB(0.87, 0.91, 1).multiplyScalar(L * (1 - beat.preDrop) * (0.08 + 0.12 * beat.redHit + 0.7 * beat.whiteEnv))
-    for (const m of ledMats.current) if (m) m.color.setRGB(0.77, 0.06, 0.11).multiplyScalar(L * (1 - beat.preDrop) * beat.kickHit * beat.kickHit)
-    for (const g of glowMats.current) g.m.emissiveIntensity = L * (1 - beat.preDrop) * g.k * (0.2 + 1.6 * beat.kickHit)
+    if (panelMat.current) panelMat.current.emissiveIntensity = Lt * (1 - beat.preDrop) * (0.05 + 4 * beat.kickHit + 2 * beat.dropFlash)
+    for (const m of edgeMats.current) m.color.setRGB(0.87, 0.91, 1).multiplyScalar(Lt * (1 - beat.preDrop) * (0.08 + 0.12 * beat.redHit + 0.7 * beat.whiteEnv))
+    for (const m of ledMats.current) if (m) m.color.setRGB(0.77, 0.06, 0.11).multiplyScalar(Lt * (1 - beat.preDrop) * beat.kickHit * beat.kickHit)
+    for (const g of glowMats.current) g.m.emissiveIntensity = Lt * (1 - beat.preDrop) * g.k * (0.2 + 1.6 * beat.kickHit)
     for (const p of platters.current) if (p && beat.active) p.rotation.y -= delta * (beat.bpm / 60) * 1.4
   })
 
@@ -421,19 +403,6 @@ export const DJBooth: React.FC<DJBoothProps> = ({ position = [0, 0, 0], rotation
         </group>
       ))}
 
-      {/* play / stop / join */}
-      <Interactable id="dj-play" onInteract={() => void onPlay()}>
-        <group position={[0, 1.0, 0.25]}>
-          <mesh position={[0, 0.06, 0]}>
-            <cylinderGeometry args={[0.3, 0.3, 0.12, 40]} />
-            <meshStandardMaterial ref={playMat} color="#202020" emissive="#e8eeff" emissiveIntensity={0.4} />
-          </mesh>
-          <mesh ref={ringRef} position={[0, 0.125, 0]} rotation={[-Math.PI / 2, 0, 0]}>
-            <ringGeometry args={[0.19, 0.26, 40]} />
-            <meshBasicMaterial color="#ffffff" transparent opacity={0.35} toneMapped={false} />
-          </mesh>
-        </group>
-      </Interactable>
 
     </group>
   )
