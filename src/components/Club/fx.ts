@@ -45,13 +45,13 @@ export function setHalo(i: number, c: Vector3, axis: Vector3 | null, radius: num
 // ---------------------------------------------------------------- environment map registry
 export const envReg = {
   tex: null as Texture | null,
-  mats: [] as { m: MeshStandardMaterial; base: number }[],
+  mats: [] as { m: MeshStandardMaterial; base: number; always?: boolean }[],
 }
-/** opt a material into the club env map; `base` = envMapIntensity at full light */
-export function envOn(m: MeshStandardMaterial | null, base: number) {
+/** opt a material into the club env map; `base` = envMapIntensity at full light (`always`: constant, e.g. the entrance outside the club) */
+export function envOn(m: MeshStandardMaterial | null, base: number, always = false) {
   if (!m || envReg.mats.some((x) => x.m === m)) return
-  envReg.mats.push({ m, base })
-  if (envReg.tex) { m.envMap = envReg.tex; m.envMapIntensity = 0; m.needsUpdate = true }
+  envReg.mats.push({ m, base, always })
+  if (envReg.tex) { m.envMap = envReg.tex; m.envMapIntensity = always ? base : 0; m.needsUpdate = true }
 }
 
 /** colour temperatures for "fluorescent" sources (cool / neutral / warm-ish), deterministic per index */

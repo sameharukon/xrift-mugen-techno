@@ -9,6 +9,8 @@ export const club = {
   door: 0,
   /** AudioContext exists and is running */
   audio: false,
+  /** the music engine is fast-forwarding to the server clock (late join) — heavy one-off GPU work waits */
+  syncing: false,
   /** 0 = listener inside the club .. 1 = outside in the corridor (set by the entrance every frame) */
   outside: 1,
   /** set by the audio rig: create / resume the AudioContext (call from a user gesture) */

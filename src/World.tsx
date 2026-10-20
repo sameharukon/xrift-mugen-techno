@@ -1,14 +1,15 @@
 import { SpawnPoint } from '@xrift/world-components'
 import { RigidBody } from '@react-three/rapier'
-import { useMemo, useRef } from 'react'
-import { useFrame } from '@react-three/fiber'
-import type { Group } from 'three'
+import { useEffect, useMemo, useRef } from 'react'
+import { useFrame, useThree } from '@react-three/fiber'
+import type { Group, Material, Object3D, Texture } from 'three'
+import { envReg } from './components/Club/fx'
 import { club } from './techno/club'
 import { DJBooth, type PAStack } from './components/DJBooth'
 import { FloorGlow, LightRig, SceneBackground, SceneFog, TubeWall, useConcrete } from './components/Club'
 import { Crowd } from './components/Club/Crowd'
 import { Entrance } from './components/Club/Entrance'
-import { Ceiling, TripodCamera } from './components/Club/Props'
+import { Ceiling } from './components/Club/Props'
 import { brickNormal, brickTexture } from './components/Club/textures'
 import { ClubEnv, ClubFloor, HaloField, HazeLayers } from './components/Club/Fx'
 import { COLORS, ROOM } from './constants'
@@ -30,11 +31,76 @@ const PA_STACKS: PAStack[] = ([[-1, -1.3], [1, -1.3], [-1, 3.0], [1, 3.0]] as co
   return { position: [x, 0, z] as [number, number, number], yaw: Math.atan2(-x, 1 - z), side: side < 0 ? 'L' : 'R' }
 })
 
-/** the club interior is not drawn while this user stands outside behind the closed door (saves ~40 draw calls) */
+/**
+ * The club interior is not drawn while this user stands outside behind the closed door (saves ~40 draw calls).
+ * Renderables and the interior lights are hidden (the corridor renders with its single light). The light count
+ * is part of every shader's program key, so the warm-up below also renders with the interior lights on: both
+ * variants (corridor-only and full club) are compiled before the door ever opens.
+ * Pre-warm: shortly after load (and again when an XR session starts) the hidden interior is drawn for a few
+ * real frames in small chunks, frustum culling off, while the player is still in the corridor. It is fully
+ * occluded by the closed door / walls and black (club lights are off until entering), but it compiles the exact
+ * program variants, uploads textures / geometry / instance buffers, so opening the door costs nothing extra.
+ */
+type Renderable = Object3D & { isMesh?: boolean; isPoints?: boolean; isLine?: boolean; isSprite?: boolean; isLight?: boolean }
+const isRenderable = (o: Renderable) => !!(o.isMesh || o.isPoints || o.isLine || o.isSprite || o.isLight)
+const isLight = (o: Renderable) => !!o.isLight
+const WARM_CHUNKS = 6
 const CullWhileClosed: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const g = useRef<Group>(null)
-  useFrame(() => {
-    if (g.current) g.current.visible = club.door > 0 || club.outside < 0.999
+  const gl = useThree((s) => s.gl)
+  const st = useRef({ shown: true, age: 0, warm: -1, warmList: [] as Renderable[], culled: new Map<Renderable, boolean>(), xr: false })
+  useEffect(() => {
+    const onXR = () => { st.current.xr = true }
+    gl.xr.addEventListener('sessionstart', onXR)
+    return () => gl.xr.removeEventListener('sessionstart', onXR)
+  }, [gl])
+  useFrame(({ scene, camera }, delta) => {
+    const root = g.current
+    if (!root) return
+    const S = st.current
+    S.age += delta
+    const show = club.door > 0 || club.outside < 0.999
+    // finish a previous warm chunk: re-hide it, restore frustum culling
+    if (S.culled.size) {
+      for (const [o, fc] of S.culled) { o.frustumCulled = fc; if (!show) o.visible = false }
+      S.culled.clear()
+    }
+    if (show) {
+      if (!S.shown) { root.traverse((o) => { if (isRenderable(o as Renderable)) o.visible = true }); S.shown = true }
+      S.warm = -1
+      return
+    }
+    // hidden: keep every renderable (also newly mounted ones) invisible
+    root.traverse((o) => { if (isRenderable(o as Renderable)) o.visible = false })
+    S.shown = false
+    // schedule warm-ups: ~1.5 s after load (env map ready) and right after an XR session starts
+    if (club.syncing) return // never compete with the late-join fast-forward (keeps join latency)
+    if ((S.warm === -1 && S.age > 1.5 && envReg.tex) || (S.xr && S.warm !== -2)) {
+      S.xr = false
+      S.warmList = []
+      root.traverse((o) => { if (isRenderable(o as Renderable)) S.warmList.push(o as Renderable) })
+      for (const o of S.warmList) {
+        const m = (o as unknown as { material?: Material | Material[] }).material
+        for (const mm of Array.isArray(m) ? m : m ? [m] : []) for (const v of Object.values(mm as unknown as Record<string, unknown>).concat(Object.values((mm as unknown as { uniforms?: Record<string, { value: unknown }> }).uniforms ?? {}).map((u) => u.value))) if (v && (v as Texture).isTexture) gl.initTexture(v as Texture)
+      }
+      // 1) compile every interior program off the main thread where KHR_parallel_shader_compile exists
+      //    (renderer.compileAsync on the temporarily revealed interior), 2) then draw it in chunks (uploads)
+      S.warm = -2
+      for (const o of S.warmList) o.visible = true
+      const done = () => { if (S.warm === -2) S.warm = 0; if (import.meta.env.DEV) (globalThis as Record<string, unknown>).__warmProgs = [gl.info.programs?.length, performance.now()] }
+      const tc = performance.now()
+      try { gl.compileAsync(scene, camera).then(done, done) } catch { done() }
+      if (import.meta.env.DEV) (globalThis as Record<string, unknown>).__warmCompile = { at: tc, syncMs: performance.now() - tc, parallel: !!gl.extensions.get('KHR_parallel_shader_compile') }
+      for (const o of S.warmList) o.visible = false
+    }
+    if (S.warm >= 0 && S.warm < WARM_CHUNKS) {
+      const n = Math.ceil(S.warmList.length / WARM_CHUNKS)
+      const chunk = S.warmList.slice(S.warm * n, (S.warm + 1) * n).concat(S.warmList.filter(isLight))
+      for (const o of chunk) { S.culled.set(o, o.frustumCulled); o.frustumCulled = false; o.visible = true }
+      S.warm++
+      if (import.meta.env.DEV) ((globalThis as Record<string, unknown>).__warmChunks ??= [] as unknown[]) && ((globalThis as Record<string, unknown>).__warmChunks as unknown[]).push([S.warm, gl.info.programs?.length, performance.now()])
+      if (import.meta.env.DEV && S.warm === WARM_CHUNKS) (globalThis as Record<string, unknown>).__warmDone = performance.now()
+    }
   })
   return <group ref={g}>{children}</group>
 }
@@ -90,10 +156,10 @@ export const World: React.FC<WorldProps> = ({ position = [0, 0, 0], scale = 1 })
       {/* v12: dark env reflections, haze sheets at head height, fake bloom halos */}
       <ClubEnv />
       <HazeLayers width={width - 0.2} zMin={zMin + 0.1} zMax={zMax - 0.3} wallZ={zMin + 0.08} />
-      <HaloField />
       <FloorGlow position={[0, 0, -1.4]} size={3} distance={4.5} lightHeight={2.5} peak={14} poolMax={0.18} />
-      <TripodCamera position={[1.2, 0, 1.5]} yaw={Math.atan2(1.2, 1.5 + 0.95)} />
       </CullWhileClosed>
+      {/* fake-bloom halos (one draw; also used by the entrance lamp, so not culled with the interior) */}
+      <HaloField />
       {import.meta.env.DEV && <DevCamOverride />}
 
       {/* ========== 入口（クラブの外の短い通路と重い鉄扉。扉を開けると音と光が入る） ========== */}

@@ -48,12 +48,12 @@ export const ClubEnv: React.FC = () => {
     eq.dispose()
     pm.dispose()
     envReg.tex = rt.texture
-    for (const { m } of envReg.mats) { m.envMap = rt.texture; m.envMapIntensity = 0; m.needsUpdate = true }
+    for (const { m, base, always } of envReg.mats) { m.envMap = rt.texture; m.envMapIntensity = always ? base : 0; m.needsUpdate = true }
     return () => { envReg.tex = null; rt.dispose() }
   }, [gl])
   useFrame(() => {
     const f = beat.lit * (1 - beat.preDrop) * Math.min(1.6, 0.45 + 0.55 * beat.whiteEnv + 0.3 * fx.rigGlow + 0.2 * fx.wallGlow)
-    for (const { m, base } of envReg.mats) m.envMapIntensity = base * f
+    for (const { m, base, always } of envReg.mats) if (!always) m.envMapIntensity = base * f
   })
   return null
 }
@@ -203,11 +203,11 @@ export const HazeLayers: React.FC<HazeProps> = ({ width, zMin, zMax, heights = [
 }
 
 // ================================================================ wet-look concrete floor (stays dark; beam hits glint)
-export const ClubFloor: React.FC<{ width: number; depth: number; zc: number; color: string }> = ({ width, depth, zc, color }) => {
-  const map = useConcrete(5)
+export const ClubFloor: React.FC<{ width: number; depth: number; zc: number; color: string; repeat?: number; env?: number; always?: boolean }> = ({ width, depth, zc, color, repeat = 5, env = 0.5, always = false }) => {
+  const map = useConcrete(repeat)
   const mat = useMemo(() => {
-    const rough = floorRoughness().clone(); rough.repeat.set(2.2, 2.6); rough.needsUpdate = true
-    const nrm = concreteNormal().clone(); nrm.repeat.set(5, 5); nrm.needsUpdate = true
+    const rough = floorRoughness().clone(); rough.repeat.set(2.2 * repeat / 5, 2.6 * repeat / 5); rough.needsUpdate = true
+    const nrm = concreteNormal().clone(); nrm.repeat.set(repeat, repeat); nrm.needsUpdate = true
     const m = new MeshStandardMaterial({ map, color, roughness: 1, roughnessMap: rough, normalMap: nrm, metalness: 0 })
     m.normalScale.set(0.6, 0.6)
     const hits = Array.from({ length: MAX_BEAMS }, () => new Vector4(0, 0, 1, 0))
@@ -226,8 +226,8 @@ export const ClubFloor: React.FC<{ width: number; depth: number; zc: number; col
   }`)
     }
     return m
-  }, [map, color])
-  useEffect(() => { envOn(mat, 0.5) }, [mat])
+  }, [map, color, repeat])
+  useEffect(() => { envOn(mat, env, always) }, [mat, env, always])
   useFrame(() => {
     const hits = mat.userData.hits as Vector4[]
     fx.beams.forEach((B, i) => {

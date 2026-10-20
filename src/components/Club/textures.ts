@@ -227,3 +227,74 @@ export const hazeNoise = () => once('haze', () => {
   for (let i = 0; i < a.length; i++) d.set([Math.round(a[i] * 255), Math.round(b[i] * 255), 0, 255], i * 4)
   return dataTex(d, N)
 })
+
+// ================================================================ v13: weathered industrial steel (entrance door / frame)
+const steelFields = (() => {
+  let cache: { N: number; rust: Float32Array; grime: Float32Array; dents: Float32Array; scratch: Float32Array; streak: Float32Array } | null = null
+  return () => {
+    if (cache) return cache
+    const N = 256
+    const rustN = fbm(N, [[6, 1], [16, 0.7], [64, 0.45]], 9001)
+    const grime = fbm(N, [[4, 1], [24, 0.5]], 9002)
+    const dents = fbm(N, [[5, 1], [12, 0.5]], 9003)
+    const rust = new Float32Array(N * N)
+    const scratch = new Float32Array(N * N)
+    const streak = new Float32Array(N * N)
+    for (let i = 0; i < rust.length; i++) {
+      const y = Math.floor(i / N) / N // 0 = bottom
+      rust[i] = Math.min(1, Math.max(0, (rustN[i] - 0.6 + 0.1 * (1 - y) * (1 - y)) * 3.5)) * 0.8
+    }
+    let s = 31; const rnd = () => ((s = (Math.imul(s, 1103515245) + 12345) | 0) >>> 0) / 4294967296
+    // rust run-off streaks (downwards from random sources) and bright scuff scratches
+    for (let k = 0; k < 46; k++) {
+      const x0 = Math.floor(rnd() * N), y0 = Math.floor(N * (0.3 + 0.7 * rnd())), len = Math.floor(N * (0.08 + 0.35 * rnd())), w = 1 + Math.floor(rnd() * 2)
+      for (let j = 0; j < len; j++) for (let dx = 0; dx < w; dx++) {
+        const y = y0 - j; if (y < 0) break
+        const i = y * N + ((x0 + dx + Math.round(Math.sin(j * 0.05 + k) * 1.5)) % N + N) % N
+        streak[i] = Math.max(streak[i], (1 - j / len) * 0.8)
+      }
+    }
+    for (let k = 0; k < 120; k++) {
+      let x = rnd() * N, y = rnd() * N * (rnd() < 0.6 ? 0.45 : 1)
+      const a = (rnd() - 0.5) * 1.2 + (rnd() < 0.5 ? 0 : Math.PI / 2), len = 3 + rnd() * 22
+      for (let j = 0; j < len; j++) { scratch[((Math.floor(y) + N) % N) * N + ((Math.floor(x) + N) % N)] = 1; x += Math.cos(a); y += Math.sin(a) }
+    }
+    cache = { N, rust, grime, dents, scratch, streak }
+    return cache
+  }
+})()
+/** sRGB albedo: dark blue-grey painted steel, worn edges, rust patches + run-off, grime towards the floor */
+export const steelColor = () => once('stC', () => {
+  const { N, rust, grime, scratch, streak } = steelFields()
+  const d = new Uint8Array(N * N * 4)
+  for (let i = 0; i < rust.length; i++) {
+    const y = Math.floor(i / N) / N
+    const g = 0.75 + 0.35 * grime[i] - 0.25 * Math.max(0, 0.25 - y) * 4 * (0.5 + grime[i])
+    let r = 0.27 * g, gg = 0.285 * g, b = 0.31 * g
+    const ru = Math.max(rust[i], streak[i] * 0.7)
+    r = r * (1 - ru) + 0.2 * ru; gg = gg * (1 - ru) + 0.12 * ru; b = b * (1 - ru) + 0.085 * ru
+    if (scratch[i]) { r = r * 0.4 + 0.42 * 0.6; gg = gg * 0.4 + 0.43 * 0.6; b = b * 0.4 + 0.45 * 0.6 }
+    d.set([r, gg, b].map((v) => Math.round(255 * Math.pow(Math.min(1, v), 1 / 2.2))).concat(255), i * 4)
+  }
+  return dataTex(d, N, true)
+})
+/** G = roughness (rust rough, scratches polished), B = metalness (paint/rust low, bare scratches high) */
+export const steelRM = () => once('stRM', () => {
+  const { N, rust, grime, scratch, streak } = steelFields()
+  const d = new Uint8Array(N * N * 4)
+  for (let i = 0; i < rust.length; i++) {
+    const ru = Math.max(rust[i], streak[i] * 0.6)
+    let rough = 0.5 + 0.2 * grime[i] + 0.35 * ru, metal = 0.55 - 0.4 * ru
+    if (scratch[i]) { rough = 0.28; metal = 0.95 }
+    d.set([0, Math.round(255 * Math.min(1, rough)), Math.round(255 * Math.max(0, metal)), 255], i * 4)
+  }
+  return dataTex(d, N)
+})
+/** soft dents + pitted rust */
+export const steelNormal = () => once('stN', () => {
+  const { N, rust, dents } = steelFields()
+  const fine = fbm(N, [[96, 1], [128, 0.7]], 9004)
+  const h = new Float32Array(N * N)
+  for (let i = 0; i < h.length; i++) h[i] = dents[i] * 0.6 + rust[i] * (fine[i] - 0.5) * 0.6 + rust[i] * 0.12
+  return normalFrom(h, N, 2.4)
+})

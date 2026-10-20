@@ -207,6 +207,7 @@ export const DJBooth: React.FC<DJBoothProps> = ({ position = [0, 0, 0], rotation
     const r = rig.current
     const st = r && r.sync.running ? r.sync.getState() : null
     const live = !!st && st.status === 'live'
+    club.syncing = !!st && st.status === 'syncing'
 
     // ---- spatial audio: panners at the stacks, listener at the camera; muffled through the door ----
     if (r) {
