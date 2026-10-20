@@ -5,7 +5,7 @@ import { useMemo, useRef, useState } from 'react'
 import { AdditiveBlending, Group, MeshBasicMaterial, Vector3 } from 'three'
 import { club } from '../../techno/club'
 import { useConcrete } from '.'
-import { brickTexture, radialTexture } from './textures'
+import { brickNormal, brickTexture, radialTexture } from './textures'
 
 /**
  * Entrance: a short, dark concrete corridor outside the club's back wall, ending in a heavy
@@ -50,13 +50,21 @@ function useBrick(w: number, h: number) {
   }, [w, h])
 }
 
+/** brick normal map sharing the colour map's repeat (cached per map) */
+const nCache = new WeakMap<object, import('three').Texture>()
+function brickN(map: import('three').Texture) {
+  let n = nCache.get(map)
+  if (!n) { n = brickNormal().clone(); n.repeat.copy(map.repeat); n.needsUpdate = true; nCache.set(map, n) }
+  return n
+}
+
 function Box({ p, s, color = '#8a8a8a', map, collide = true, rough = 0.95, metal = 0 }: {
   p: [number, number, number]; s: [number, number, number]; color?: string; map?: import('three').Texture; collide?: boolean; rough?: number; metal?: number
 }) {
   const m = (
     <mesh position={p}>
       <boxGeometry args={s} />
-      <meshStandardMaterial map={map} color={color} roughness={rough} metalness={metal} />
+      <meshStandardMaterial map={map} normalMap={map ? brickN(map) : undefined} color={color} roughness={rough} metalness={metal} />
     </mesh>
   )
   return collide ? <RigidBody type="fixed" colliders="cuboid" restitution={0} friction={0}>{m}</RigidBody> : m

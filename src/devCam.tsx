@@ -15,6 +15,7 @@ export function DevCamOverride() {
     const prev = scene.onBeforeRender
     scene.onBeforeRender = (renderer, sc, camera, ...rest) => {
       prev.call(scene, renderer, sc, camera, ...rest)
+      ;(globalThis as Record<string, unknown>).__cam = camera
       const o = (globalThis as Record<string, unknown>).__camOverride as { pos: number[]; look: number[] } | undefined
       if (!o) return
       tmp.position.set(o.pos[0], o.pos[1], o.pos[2])

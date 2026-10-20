@@ -1,10 +1,9 @@
 import { useServerClock } from '@xrift/world-components'
-import { RigidBody } from '@react-three/rapier'
 import { useFrame, useThree } from '@react-three/fiber'
 import { useCallback, useEffect, useRef } from 'react'
-import { Group, Mesh, MeshBasicMaterial, MeshStandardMaterial, Vector3 } from 'three'
+import { Group, MeshBasicMaterial, MeshStandardMaterial, Vector3 } from 'three'
 import { BANDS } from '../../techno/engine'
-import { useConcrete } from '../Club'
+import { BoothGear } from './Gear'
 import { beat } from '../../techno/beat'
 import { buildClubPA, type ClubPA } from '../../techno/clubPA'
 import { FIXED_BAND, PerpetualTechno, segIndexAt, segStartMs } from '../../techno/sync'
@@ -121,12 +120,6 @@ export const DJBooth: React.FC<DJBoothProps> = ({ position = [0, 0, 0], rotation
 
   const rig = useRef<AudioRig | null>(null)
   const panelMat = useRef<MeshStandardMaterial>(null)
-  const platters = useRef<(Mesh | null)[]>([])
-  const concrete = useConcrete(1)
-  const glowMats = useRef<{ m: MeshStandardMaterial; k: number }[]>([])
-  const addGlow = useCallback((k: number) => (m: MeshStandardMaterial | null) => {
-    if (m && !glowMats.current.some((g) => g.m === m)) glowMats.current.push({ m, k })
-  }, [])
   const lastKickStep = useRef(-1)
   const enteredAt = useRef(0)
 
@@ -335,67 +328,12 @@ export const DJBooth: React.FC<DJBoothProps> = ({ position = [0, 0, 0], rotation
     if (panelMat.current) panelMat.current.emissiveIntensity = Lt * (1 - beat.preDrop) * (0.05 + 4 * beat.kickHit + 2 * beat.dropFlash)
     for (const m of edgeMats.current) m.color.setRGB(0.87, 0.91, 1).multiplyScalar(Lt * (1 - beat.preDrop) * (0.08 + 0.12 * beat.redHit + 0.7 * beat.whiteEnv))
     for (const m of ledMats.current) if (m) m.color.setRGB(0.77, 0.06, 0.11).multiplyScalar(Lt * (1 - beat.preDrop) * beat.kickHit * beat.kickHit)
-    for (const g of glowMats.current) g.m.emissiveIntensity = Lt * (1 - beat.preDrop) * g.k * (0.2 + 1.6 * beat.kickHit)
-    for (const p of platters.current) if (p && beat.active) p.rotation.y -= delta * (beat.bpm / 60) * 1.4
   })
 
   return (
     <group position={position} rotation={rotation}>
-      {/* table */}
-      <RigidBody type="fixed" colliders="cuboid">
-        <mesh position={[0, 0.5, 0]} castShadow receiveShadow>
-          <boxGeometry args={[3.6, 1, 1.2]} />
-          <meshStandardMaterial map={concrete} color="#6a6a6a" roughness={0.95} metalness={0} />
-        </mesh>
-      </RigidBody>
-      {/* raw steel angle trim (unlit; only catches the show lights) */}
-      {[0.61, -0.61].map((z) => (
-        <mesh key={z} position={[0, 1.0, z]}>
-          <boxGeometry args={[3.66, 0.05, 0.05]} />
-          <meshStandardMaterial color="#2a2b2e" metalness={0.9} roughness={0.45} />
-        </mesh>
-      ))}
-      {/* thin deep-red line (kick ambience) */}
-      <mesh position={[0, 0.5, 0.605]}>
-        <planeGeometry args={[3.5, 0.03]} />
-        <meshStandardMaterial ref={panelMat} color="#0b0b0b" emissive="#c4101c" emissiveIntensity={0} />
-      </mesh>
-      {/* decks + mixer (decor) on the back half of the table */}
-      {[-1.15, 1.15].map((x, i) => (
-        <group key={x} position={[x, 1.0, -0.3]}>
-          <mesh position={[0, 0.03, 0]}>
-            <boxGeometry args={[0.9, 0.06, 0.5]} />
-            <meshStandardMaterial color="#1b1b1c" metalness={0.7} roughness={0.5} />
-          </mesh>
-          <mesh ref={(m) => { platters.current[i] = m }} position={[-0.1, 0.075, 0]}>
-            <cylinderGeometry args={[0.2, 0.2, 0.03, 32]} />
-            <meshStandardMaterial color="#0d0d0f" roughness={0.3} />
-          </mesh>
-          <mesh position={[-0.1, 0.095, 0.12]}>
-            <boxGeometry args={[0.03, 0.01, 0.06]} />
-            <meshStandardMaterial color="#8a8a8a" />
-          </mesh>
-        </group>
-      ))}
-      <group position={[0, 1.0, -0.3]}>
-        <mesh position={[0, 0.04, 0]}>
-          <boxGeometry args={[0.55, 0.08, 0.5]} />
-          <meshStandardMaterial color="#1e1e1f" metalness={0.7} roughness={0.5} />
-        </mesh>
-        {[-0.15, 0, 0.15].map((x) => [-0.12, 0.02].map((z) => (
-          <mesh key={`${x}${z}`} position={[x, 0.1, z]}>
-            <cylinderGeometry args={[0.025, 0.025, 0.04, 12]} />
-            <meshStandardMaterial ref={addGlow(0.5)} color="#555" emissive="#c4101c" emissiveIntensity={0} />
-          </mesh>
-        )))}
-      </group>
-      {/* booth monitors: small wedges on the table ends (unlit) */}
-      {[-1.65, 1.65].map((x) => (
-        <mesh key={x} position={[x, 1.14, -0.35]} rotation={[0.35, x > 0 ? -0.5 : 0.5, 0]}>
-          <boxGeometry args={[0.32, 0.28, 0.3]} />
-          <meshStandardMaterial color="#111" roughness={0.8} />
-        </mesh>
-      ))}
+      {/* flight-case table + CDJs / mixer / laptop / headphones / monitors / cables */}
+      <BoothGear panelRef={panelMat} />
       {/* PA stacks (sub + top); their positions drive the spatial PA panners */}
       {pa.map((sp, i) => (
         <group key={i} position={sp.position} rotation={[0, sp.yaw, 0]} ref={(g) => { stackRefs.current[i] = g }}>

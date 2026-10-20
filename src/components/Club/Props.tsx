@@ -1,6 +1,7 @@
 import { useFrame } from '@react-three/fiber'
 import { useMemo, useRef } from 'react'
 import { MeshBasicMaterial } from 'three'
+import { concreteNormal } from './textures'
 import { beat } from '../../techno/beat'
 import { PALETTE } from './index'
 
@@ -42,13 +43,14 @@ export const TripodCamera: React.FC<{ position?: [number, number, number]; yaw?:
 
 /** exposed ducts + pipes under a low ceiling (static, unlit until the show lights catch them) */
 export const Ceiling: React.FC<{ width: number; zMin: number; zMax: number; height: number; map?: import('three').Texture }> = ({ width, zMin, zMax, height, map }) => {
+  const nrm = useMemo(() => { const t = concreteNormal().clone(); t.repeat.set(3, 3); t.needsUpdate = true; return t }, [])
   const depth = zMax - zMin
   const zc = (zMin + zMax) / 2
   return (
     <group>
       <mesh position={[0, height, zc]} rotation={[Math.PI / 2, 0, 0]}>
         <planeGeometry args={[width, depth]} />
-        <meshStandardMaterial map={map} color="#555" roughness={0.95} />
+        <meshStandardMaterial map={map} normalMap={nrm} normalScale={[0.5, 0.5]} color="#555" roughness={0.92} />
       </mesh>
       {/* two big round ducts running front → back */}
       {[-width * 0.3, width * 0.3].map((x) => (

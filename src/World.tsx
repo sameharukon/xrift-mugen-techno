@@ -9,7 +9,8 @@ import { FloorGlow, LightRig, SceneBackground, SceneFog, TubeWall, useConcrete }
 import { Crowd } from './components/Club/Crowd'
 import { Entrance } from './components/Club/Entrance'
 import { Ceiling, TripodCamera } from './components/Club/Props'
-import { brickTexture } from './components/Club/textures'
+import { brickNormal, brickTexture } from './components/Club/textures'
+import { ClubEnv, ClubFloor, HaloField, HazeLayers } from './components/Club/Fx'
 import { COLORS, ROOM } from './constants'
 import { DevCamOverride } from './devCam'
 
@@ -42,9 +43,10 @@ export const World: React.FC<WorldProps> = ({ position = [0, 0, 0], scale = 1 })
   const { width, zMin, zMax, height, wall } = ROOM
   const depth = zMax - zMin
   const zc = (zMin + zMax) / 2
-  const floorMap = useConcrete(5)
   const ceilMap = useConcrete(3)
   const brickSide = useMemo(() => { const t = brickTexture().clone(); t.repeat.set(depth / 2, height / 2); t.needsUpdate = true; return t }, [depth, height])
+  const nSide = useMemo(() => { const t = brickNormal().clone(); t.repeat.set(depth / 2, height / 2); t.needsUpdate = true; return t }, [depth, height])
+  const nEnd = useMemo(() => { const t = brickNormal().clone(); t.repeat.set(width / 2, height / 2); t.needsUpdate = true; return t }, [width, height])
   const brickEnd = useMemo(() => { const t = brickTexture().clone(); t.repeat.set(width / 2, height / 2); t.needsUpdate = true; return t }, [width, height])
 
   return (
@@ -53,22 +55,19 @@ export const World: React.FC<WorldProps> = ({ position = [0, 0, 0], scale = 1 })
       <SceneFog color={COLORS.fog} near={3} far={17} />
       <SceneBackground color={COLORS.background} />
       <RigidBody type="fixed" colliders="cuboid" restitution={0} friction={0}>
-        <mesh rotation={[-Math.PI / 2, 0, 0]} position={[0, 0, zc]}>
-          <planeGeometry args={[width, depth]} />
-          <meshStandardMaterial map={floorMap} color={COLORS.ground} roughness={0.8} metalness={0.05} />
-        </mesh>
+        <ClubFloor width={width} depth={depth} zc={zc} color={COLORS.ground} />
       </RigidBody>
 
       {/* ========== 壁（レンガ）・低い天井（ダクト / 配管） ========== */}
       {([
-        [[width / 2 + wall / 2, height / 2, zc], [wall, height, depth], brickSide],
-        [[-width / 2 - wall / 2, height / 2, zc], [wall, height, depth], brickSide],
-        [[0, height / 2, zMin - wall / 2], [width, height, wall], brickEnd],
-      ] as const).map(([p, s, map], i) => (
+        [[width / 2 + wall / 2, height / 2, zc], [wall, height, depth], brickSide, nSide],
+        [[-width / 2 - wall / 2, height / 2, zc], [wall, height, depth], brickSide, nSide],
+        [[0, height / 2, zMin - wall / 2], [width, height, wall], brickEnd, nEnd],
+      ] as const).map(([p, s, map, nmap], i) => (
         <RigidBody key={i} type="fixed" colliders="cuboid" restitution={0} friction={0}>
           <mesh position={p as unknown as [number, number, number]}>
             <boxGeometry args={s as unknown as [number, number, number]} />
-            <meshStandardMaterial map={map} color={COLORS.wall} roughness={0.95} />
+            <meshStandardMaterial map={map} normalMap={nmap} color={COLORS.wall} roughness={0.88} />
           </mesh>
         </RigidBody>
       ))}
@@ -88,6 +87,10 @@ export const World: React.FC<WorldProps> = ({ position = [0, 0, 0], scale = 1 })
       {/* low truss above the back of the crowd, beams tilted towards the booth / camera (backlight) */}
       <LightRig position={[0, height - 0.55, zMin + 1.6]} width={width - 2.4} beamLength={3.6} tiltDir={-1} trussLength={width - 0.4} spill={7} spillDistance={3.2} />
       {/* red kick light from booth/truss height behind the DJ (backlights heads & shoulders); only a small, faint pool on the floor */}
+      {/* v12: dark env reflections, haze sheets at head height, fake bloom halos */}
+      <ClubEnv />
+      <HazeLayers width={width - 0.2} zMin={zMin + 0.1} zMax={zMax - 0.3} wallZ={zMin + 0.08} />
+      <HaloField />
       <FloorGlow position={[0, 0, -1.4]} size={3} distance={4.5} lightHeight={2.5} peak={14} poolMax={0.18} />
       <TripodCamera position={[1.2, 0, 1.5]} yaw={Math.atan2(1.2, 1.5 + 0.95)} />
       </CullWhileClosed>
