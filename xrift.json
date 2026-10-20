@@ -1,7 +1,7 @@
 {
   "world": {
     "distDir": "./dist",
-    "title": "Mugen Techno",
+    "title": "Mugen Techno Club",
     "description": "地下クラブで140BPM前後のテクノが無限に生成され続けるワールド。扉を開けると全員同期した音が鳴ります。強い点滅があります。",
     "thumbnailPath": "thumbnail.png",
     "buildCommand": "npm run build",

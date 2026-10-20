@@ -6,6 +6,7 @@ import { BANDS } from '../../techno/engine'
 import { BoothGear } from './Gear'
 import { beat } from '../../techno/beat'
 import { buildClubPA, type ClubPA } from '../../techno/clubPA'
+import { volume, volumeGain } from '../../techno/volume'
 import { FIXED_BAND, PerpetualTechno, segIndexAt, segStartMs } from '../../techno/sync'
 import { club } from '../../techno/club'
 
@@ -40,6 +41,9 @@ interface AudioRig {
   sync: PerpetualTechno
   muffle: BiquadFilterNode
   muffleGain: GainNode
+  /** per-user volume (after the limiter and the door muffle → applies inside and outside) */
+  vol: GainNode
+  volLevel: number
 }
 
 /** closed door: low-pass corner (Hz) and level of the PA as heard from the corridor */
@@ -136,7 +140,9 @@ export const DJBooth: React.FC<DJBoothProps> = ({ position = [0, 0, 0], rotation
       muffle.Q.value = 0.5
       const muffleGain = ctx.createGain()
       muffleGain.gain.value = MUFFLE_GAIN
-      muffle.connect(muffleGain).connect(ctx.destination)
+      const vol = ctx.createGain()
+      vol.gain.value = volumeGain(volume.level)
+      muffle.connect(muffleGain).connect(vol).connect(ctx.destination)
       // club PA: mono low bed + stereo mid/high bed + spatial stacks + basement reverb (see clubPA.ts)
       const pa = buildClubPA(ctx, paRef.current.map((s) => ({ side: s.side })), {}, muffle)
       const input = pa.input
@@ -148,8 +154,9 @@ export const DJBooth: React.FC<DJBoothProps> = ({ position = [0, 0, 0], rotation
       anaTrim.gain.value = 0.6 / input.gain.value
       input.connect(anaTrim).connect(analyser)
       const sync = new PerpetualTechno(ctx, input, () => clockRef.current.now() + (import.meta.env.DEV ? Number((globalThis as Record<string, unknown>).__clockSkewMs) || 0 : 0))
-      rig.current = { ctx, input, pa, analyser, freq: new Uint8Array(analyser.frequencyBinCount), sync, muffle, muffleGain }
+      rig.current = { ctx, input, pa, analyser, freq: new Uint8Array(analyser.frequencyBinCount), sync, muffle, muffleGain, vol, volLevel: volume.level }
       if (import.meta.env.DEV) (globalThis as Record<string, unknown>).__techno = rig.current
+      volume.onChange = (l) => { const R = rig.current; if (R) { R.volLevel = l; R.vol.gain.setTargetAtTime(volumeGain(l), R.ctx.currentTime, 0.04) } }
     }
     const r = rig.current
     const go = () => {
@@ -236,6 +243,8 @@ export const DJBooth: React.FC<DJBoothProps> = ({ position = [0, 0, 0], rotation
       const m = club.outside * (1 - 0.75 * club.door)
       r.muffle.frequency.setTargetAtTime(MUFFLE_HZ * Math.pow(OPEN_HZ / MUFFLE_HZ, 1 - m), t, 0.08)
       r.muffleGain.gain.setTargetAtTime(MUFFLE_GAIN + (1 - MUFFLE_GAIN) * (1 - m), t, 0.08)
+      // volume fader: short exponential approach (≈ 40 ms) → no zipper noise / clicks
+      if (r.volLevel !== volume.level) { r.volLevel = volume.level; r.vol.gain.setTargetAtTime(volumeGain(volume.level), t, 0.04) }
     }
 
     // ---- musical events → visual state (released on the audio clock, when they are heard) ----

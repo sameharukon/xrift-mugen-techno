@@ -11,6 +11,7 @@ import { club } from '../../techno/club'
 import { useConcrete } from '.'
 import { allocHalo, envOn, setHalo } from './fx'
 import { ClubFloor } from './Fx'
+import { VolumeFader } from './VolumeFader'
 import { box, Builder, cyl, rbox, T } from './geo'
 import { brickNormal, brickTexture, concreteNormal, hazeNoise, radialTexture, steelColor, steelNormal, steelRM, brushedRoughness } from './textures'
 
@@ -42,6 +43,8 @@ const PANEL_W = DOOR_W + 0.16
 const PANEL_H = DOOR_H + 0.08
 const OPEN_S = 1.5
 const TRIGGER_DIST = 1.15
+/** volume fader centre height (hand height) */
+const FADER_Y = 1.3
 /** the listener must stay in the trigger zone this long (s), and not in the first seconds after load (spawn settling) */
 const TRIGGER_HOLD = 0.3
 const TRIGGER_GRACE = 2.5
@@ -389,6 +392,13 @@ export const Entrance: React.FC<EntranceProps> = ({ zMax, wall, roomWidth, roomH
           </Interactable>
         </group>
       </group>
+
+      {/* per-user volume faders (same level both sides): club side left of the doorway on the back wall, and in the
+          corridor on the left wall next to the door (by the fuse box) */}
+      <VolumeFader id="vol-in" position={[-(DOOR_W / 2 + 0.45), FADER_Y, zMax]} rotationY={Math.PI} conduit={roomHeight - FADER_Y - 0.17}
+        mats={{ steel: mats.frameSteel, hw: mats.hw, rubber: mats.rubber, paint: mats.paint }} accept={(c) => c.z < zMax + wall / 2} />
+      <VolumeFader id="vol-out" position={[-width / 2, FADER_Y, z0 + 0.7]} rotationY={Math.PI / 2} conduit={height - FADER_Y - 0.17}
+        mats={{ steel: mats.frameSteel, hw: mats.hw, rubber: mats.rubber, paint: mats.paint }} accept={(c) => c.z > z0 - 0.05} />
 
       {/* caged tungsten bulb + red pilot lamp (emissive cores; halos in the shared HaloField) */}
       <mesh position={[lampPos.x, lampPos.y - 0.045, lampPos.z]}>
