@@ -7,7 +7,9 @@ import {
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js'
 import { allocHalo, envOn, fx, setHalo, shaderClock, TINTS } from './fx'
 import { beat } from '../../techno/beat'
-import { concreteTexture, hazeNoise, radialTexture } from './textures'
+import { BRUSH_TILE, concreteTexture, hazeNoise, radialTexture } from './textures'
+import { metalUV } from './geo'
+import { brushedMetal } from './metal'
 
 /**
  * Underground / warehouse look: monochrome cold white + a single deep red for the low end.
@@ -246,8 +248,7 @@ function rigStaticGeometry(trussLen: number, width: number) {
       cyl(0.04, 0.05, x + s * 0.625, -0.2, 0.25, 0, Math.PI / 2, 8)
     }
   }
-  const nonIdx = parts.map((g) => (g.index ? g.toNonIndexed() : g))
-  nonIdx.forEach((g) => { g.deleteAttribute('uv') })
+  const nonIdx = parts.map((g) => metalUV(g, BRUSH_TILE, true)) // v16: metre-based UVs for the brushed texture set
   const m = mergeGeometries(nonIdx, false)!
   parts.forEach((g) => g.dispose())
   return m
@@ -273,7 +274,7 @@ export const LightRig: React.FC<LightRigProps> = ({ position = [0, 4.2, 0], widt
   const tubes = useRef<InstancedMesh>(null)
   const strobes = useRef<InstancedMesh>(null)
   const strobeLight = useRef<PointLight>(null)
-  const metal = useRef<MeshStandardMaterial>(null)
+  const trussMat = useMemo(() => brushedMetal('#2a2c30', 0.85, 0.25), [])
   const headMat = useRef<MeshStandardMaterial>(null)
   const beamEnv = useEnvelopes(HEADS)
   const tubeEnv = useEnvelopes(TUBES)
@@ -293,7 +294,7 @@ export const LightRig: React.FC<LightRigProps> = ({ position = [0, 4.2, 0], widt
     strobe: Array.from({ length: STROBES }, (_, i) => allocHalo(`rig.strobe${i}`)),
     lens: Array.from({ length: HEADS }, (_, i) => allocHalo(`rig.lens${i}`)),
   }), [])
-  useEffect(() => { envOn(metal.current, 0.9); envOn(headMat.current, 1.0) }, [])
+  useEffect(() => { envOn(trussMat, 0.9, false, true); envOn(headMat.current, 1.0) }, [trussMat])
   useFrame((_, delta) => {
     const G = gate()
     const groove = 1 - beat.breakAmt
@@ -422,9 +423,7 @@ export const LightRig: React.FC<LightRigProps> = ({ position = [0, 4.2, 0], widt
   return (
     <group position={position} ref={root}>
       {/* box truss, moving-head bases / yokes, strobe housings, tube hangers (one merged mesh) */}
-      <mesh geometry={staticGeo}>
-        <meshStandardMaterial ref={metal} color="#2a2c30" metalness={0.85} roughness={0.42} />
-      </mesh>
+      <mesh geometry={staticGeo} material={trussMat} />
       {/* strobe panels (instanced) */}
       <instancedMesh ref={(m) => { if (m && !m.instanceColor) { strobeMatrices.forEach((M, i) => { m.setMatrixAt(i, M); m.setColorAt(i, tmpCol.set(0, 0, 0)) }) } (strobes as React.MutableRefObject<InstancedMesh | null>).current = m }}
         args={[undefined, undefined, STROBES]} frustumCulled={false}>

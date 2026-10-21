@@ -6,7 +6,7 @@ import {
 } from 'three'
 import { beat } from '../../techno/beat'
 import { PALETTE, useConcrete } from '.'
-import { envOn, envReg, fx, halo, HALO_CAP, MAX_BEAMS, shaderClock } from './fx'
+import { envFor, envOn, envReg, fx, halo, HALO_CAP, MAX_BEAMS, shaderClock } from './fx'
 import { concreteNormal, floorRoughness, hazeNoise } from './textures'
 
 // ================================================================ dark environment map
@@ -19,37 +19,90 @@ export const ClubEnv: React.FC = () => {
   const gl = useThree((s) => s.gl)
   useEffect(() => {
     const W = 128, H = 64
-    const d = new Uint8Array(W * H * 4)
-    for (let y = 0; y < H; y++) {
-      const el = (0.5 - (y + 0.5) / H) * Math.PI // +π/2 up … −π/2 down
-      for (let x = 0; x < W; x++) {
-        const az = (x / W) * Math.PI * 2
-        let r = 0, g = 0, b = 0
-        if (el > 0) { r = g = b = 0.018 + 0.01 * Math.sin(el) }
-        // tube band 8°..28° elevation, 9 stripes around
-        const band = Math.exp(-(((el - 0.3) / 0.12) ** 2))
-        const stripes = Math.pow(Math.max(0, Math.cos(az * 9)), 18)
-        const warm = Math.sin(az * 3) > 0.4
-        r += band * stripes * (warm ? 0.55 : 0.42); g += band * stripes * (warm ? 0.5 : 0.46); b += band * stripes * (warm ? 0.42 : 0.55)
-        // soft wide white wash from the truss side + red glow patch
-        const wash = Math.exp(-(((el - 0.45) / 0.35) ** 2)) * Math.exp(-(((az - Math.PI) / 0.9) ** 2))
-        r += wash * 0.08; g += wash * 0.085; b += wash * 0.1
-        const red = Math.exp(-(((el - 0.15) / 0.25) ** 2)) * Math.exp(-(((az - 0.6) / 0.5) ** 2))
-        r += red * 0.35; g += red * 0.02; b += red * 0.03
-        d.set([r, g, b].map((v) => Math.round(255 * Math.min(1, Math.pow(v, 1 / 2.2)))).concat(255), (y * W + x) * 4)
+    // v16: rows follow three's equirect lookup (row 0 = straight DOWN, v = asin(dir.y)/π + 0.5); before v16 the map
+    // was built upside-down, so up-facing metal (booth rails, ball corners, laptop) reflected the black "floor" half.
+    const build = (fn: (el: number, dx: number, dz: number) => [number, number, number]) => {
+      const d = new Uint8Array(W * H * 4)
+      for (let y = 0; y < H; y++) {
+        const el = ((y + 0.5) / H - 0.5) * Math.PI // −π/2 down … +π/2 up
+        for (let x = 0; x < W; x++) {
+          const phi = ((x + 0.5) / W) * Math.PI * 2 - Math.PI // atan2(dir.z, dir.x)
+          const c = fn(el, Math.cos(phi) * Math.cos(el), Math.sin(phi) * Math.cos(el))
+          d.set(c.map((v) => Math.round(255 * Math.min(1, Math.pow(Math.max(0, v), 1 / 2.2)))).concat(255), (y * W + x) * 4)
+        }
       }
+      const eq = new DataTexture(d, W, H, RGBAFormat)
+      eq.mapping = EquirectangularReflectionMapping
+      eq.colorSpace = SRGBColorSpace
+      eq.needsUpdate = true
+      return eq
     }
-    const eq = new DataTexture(d, W, H, RGBAFormat)
-    eq.mapping = EquirectangularReflectionMapping
-    eq.colorSpace = SRGBColorSpace
-    eq.needsUpdate = true
+    // club (v15 content, kept bit-exact for the non-metal opt-ins: built with the original row order)
+    const legacy = (() => {
+      const d = new Uint8Array(W * H * 4)
+      for (let y = 0; y < H; y++) {
+        const el = (0.5 - (y + 0.5) / H) * Math.PI
+        for (let x = 0; x < W; x++) {
+          const az = (x / W) * Math.PI * 2
+          let r = 0, g = 0, b = 0
+          if (el > 0) { r = g = b = 0.018 + 0.01 * Math.sin(el) }
+          const band = Math.exp(-(((el - 0.3) / 0.12) ** 2))
+          const stripes = Math.pow(Math.max(0, Math.cos(az * 9)), 18)
+          const warm = Math.sin(az * 3) > 0.4
+          r += band * stripes * (warm ? 0.55 : 0.42); g += band * stripes * (warm ? 0.5 : 0.46); b += band * stripes * (warm ? 0.42 : 0.55)
+          const wash = Math.exp(-(((el - 0.45) / 0.35) ** 2)) * Math.exp(-(((az - Math.PI) / 0.9) ** 2))
+          r += wash * 0.08; g += wash * 0.085; b += wash * 0.1
+          const red = Math.exp(-(((el - 0.15) / 0.25) ** 2)) * Math.exp(-(((az - 0.6) / 0.5) ** 2))
+          r += red * 0.35; g += red * 0.02; b += red * 0.03
+          d.set([r, g, b].map((v) => Math.round(255 * Math.min(1, Math.pow(v, 1 / 2.2)))).concat(255), (y * W + x) * 4)
+        }
+      }
+      const eq = new DataTexture(d, W, H, RGBAFormat)
+      eq.mapping = EquirectangularReflectionMapping
+      eq.colorSpace = SRGBColorSpace
+      eq.needsUpdate = true
+      return eq
+    })()
+    // metals: the right way up. Tube wall around the horizon (−8° … +35°), the dim crowd below it, a dark floor with
+    // soft red / white light pools, faint ceiling, white wash from the truss side, red glow patch
+    const club = build((el, dx, dz) => {
+      const az = Math.atan2(dz, dx) + Math.PI
+      let r = 0, g = 0, b = 0
+      if (el > 0) { r = g = b = 0.016 + 0.01 * Math.sin(el) } else { r = g = b = 0.006 }
+      const band = Math.exp(-(((el - 0.22) / 0.2) ** 2))
+      const stripes = Math.pow(Math.max(0, Math.cos(az * 9)), 14)
+      const warm = Math.sin(az * 3) > 0.4
+      r += band * stripes * (warm ? 0.55 : 0.42); g += band * stripes * (warm ? 0.5 : 0.46); b += band * stripes * (warm ? 0.42 : 0.55)
+      const crowd = Math.exp(-(((el + 0.12) / 0.14) ** 2)) * (0.6 + 0.4 * Math.sin(az * 23) * Math.sin(az * 7))
+      r += crowd * 0.022; g += crowd * 0.018; b += crowd * 0.026
+      const pools = el < 0 ? Math.exp(-(((el + 0.75) / 0.3) ** 2)) : 0
+      r += pools * (0.05 + 0.05 * Math.max(0, Math.cos(az * 2 - 1))); g += pools * 0.012; b += pools * 0.016
+      r += pools * 0.02 * Math.max(0, Math.cos(az * 3 + 2)); g += pools * 0.02 * Math.max(0, Math.cos(az * 3 + 2)); b += pools * 0.024 * Math.max(0, Math.cos(az * 3 + 2))
+      const wash = Math.exp(-(((el - 0.45) / 0.35) ** 2)) * Math.exp(-(((az - Math.PI) / 0.9) ** 2))
+      r += wash * 0.08; g += wash * 0.085; b += wash * 0.1
+      const red = Math.exp(-(((el - 0.1) / 0.3) ** 2)) * Math.exp(-(((az - 0.6) / 0.5) ** 2))
+      r += red * 0.35; g += red * 0.02; b += red * 0.03
+      return [r, g, b]
+    })
+    // corridor: dark, one warm caged bulb high above the door (+z side, ~75° up), warm-lit brick around it, black floor
+    const corr = build((el, _dx, dz) => {
+      const dy = Math.sin(el)
+      const bulb = Math.pow(Math.max(0, dy * 0.97 + dz * 0.24), 160) // tight hot spot
+      const glow = Math.pow(Math.max(0, dy * 0.9 + dz * 0.43), 6) // lit ceiling / wall above the door
+      const wall = Math.exp(-((el / 0.5) ** 2)) * (0.6 + 0.4 * Math.max(0, dz)) // brick walls, brighter towards the bulb end
+      const floor = el < 0 ? 0.006 : 0
+      const k = 1.6 * bulb + 0.14 * glow + 0.11 * wall + floor
+      return [k * 1.0, k * 0.74, k * 0.45]
+    })
     const pm = new PMREMGenerator(gl)
-    const rt = pm.fromEquirectangular(eq)
-    eq.dispose()
+    const rt = pm.fromEquirectangular(legacy), rtM = pm.fromEquirectangular(club), rtC = pm.fromEquirectangular(corr)
+    legacy.dispose(); club.dispose(); corr.dispose()
     pm.dispose()
     envReg.tex = rt.texture
-    for (const { m, base, always } of envReg.mats) { m.envMap = rt.texture; m.envMapIntensity = always ? base : 0; m.needsUpdate = true }
-    return () => { envReg.tex = null; rt.dispose() }
+    envReg.texMetal = rtM.texture
+    envReg.texCorr = rtC.texture
+    for (const { m, base, always, metal } of envReg.mats) { m.envMap = envFor(always, metal); m.envMapIntensity = always ? base : 0; m.needsUpdate = true }
+    return () => { envReg.tex = null; envReg.texMetal = null; envReg.texCorr = null; rt.dispose(); rtM.dispose(); rtC.dispose() }
   }, [gl])
   useFrame(() => {
     const f = beat.lit * (1 - beat.preDrop) * Math.min(1.6, 0.45 + 0.55 * beat.whiteEnv + 0.3 * fx.rigGlow + 0.2 * fx.wallGlow)

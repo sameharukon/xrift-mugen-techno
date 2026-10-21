@@ -13,7 +13,8 @@ import { allocHalo, envOn, setHalo, shaderClock } from './fx'
 import { ClubFloor } from './Fx'
 import { VolumeFader } from './VolumeFader'
 import { box, Builder, cyl, rbox, T } from './geo'
-import { brickNormal, brickTexture, concreteNormal, hazeNoise, radialTexture, steelColor, steelNormal, steelRM, brushedRoughness } from './textures'
+import { brickNormal, brickTexture, concreteNormal, hazeNoise, radialTexture, BRUSH_TILE, PAINT_TILE } from './textures'
+import { brushedMetal, paintedSteel } from './metal'
 
 /**
  * Entrance: a short, dark concrete corridor outside the club's back wall, ending in a heavy
@@ -94,7 +95,7 @@ const rivet = () => new SphereGeometry(0.009, 6, 3, 0, Math.PI * 2, 0, Math.PI /
 
 /** sliding door leaf → steel (skin, frame channels, ribs), hardware (rivets, pull bar, lock box, hangers, rollers), rubber (kick plate, sweep) */
 function doorGeometry() {
-  const steel = new Builder(), hw = new Builder(), rubber = new Builder()
+  const steel = new Builder(PAINT_TILE, false), hw = new Builder(BRUSH_TILE), rubber = new Builder()
   const W = PANEL_W, H = PANEL_H, f = SKIN_D / 2
   steel.add(box(W, H, SKIN_D), T(0, H / 2, 0))
   // perimeter channel (stiles + rails) and 3 hat-section ribs
@@ -136,7 +137,7 @@ function doorGeometry() {
 
 /** static steel frame (bevelled jambs / head / track rail) + bolts, brackets, end stops, threshold (corridor side of the doorway) */
 function frameGeometry(z0: number) {
-  const steel = new Builder(), hw = new Builder()
+  const steel = new Builder(PAINT_TILE, false), hw = new Builder(BRUSH_TILE)
   const zf = z0 + 0.04
   for (const sx of [-1, 1]) {
     steel.add(rbox(0.13, DOOR_H + 0.12, 0.08, 0.012), T(sx * (DOOR_W / 2 + 0.065), (DOOR_H + 0.12) / 2, zf))
@@ -160,7 +161,7 @@ function frameGeometry(z0: number) {
 
 /** corridor details in dark painted metal: conduits + clamps, drain pipe, fuse box + its conduit, vent, cables, lamp fixture (bracket, socket, cage) */
 function corridorGeometry(z0: number, z1: number, width: number, height: number, lamp: Vector3, pilot: Vector3) {
-  const g = new Builder()
+  const g = new Builder(PAINT_TILE, false)
   const tube = (pts: [number, number, number][], r: number, seg = 32) => g.add(new TubeGeometry(new CatmullRomCurve3(pts.map((p) => new Vector3(...p))), seg, r, 6, false))
   const L = z1 - z0, zc = (z0 + z1) / 2
   // ceiling conduits (two sizes) with clamps
@@ -261,16 +262,17 @@ export const Entrance: React.FC<EntranceProps> = ({ zMax, wall, roomWidth, roomH
   const details = useMemo(() => corridorGeometry(z0, z1, width, height, lampPos, pilotPos), [z0, z1, width, height, lampPos, pilotPos])
 
   const mats = useMemo(() => {
-    const steel = new MeshStandardMaterial({ map: steelColor(), roughnessMap: steelRM(), metalnessMap: steelRM(), normalMap: steelNormal(), roughness: 1, metalness: 1, color: '#c8c8c8' })
-    steel.normalScale.set(0.8, 0.8)
-    const frameSteel = steel.clone(); frameSteel.color.set('#8a8a8a')
-    const hw = new MeshStandardMaterial({ color: '#6b6e73', metalness: 0.9, roughness: 1, roughnessMap: brushedRoughness() })
+    // v16: painted steel = dielectric paint + bare scuffs (albedo pre-scaled so the diffuse level matches v15's 0.55-metal paint)
+    const steel = paintedSteel('#c8c8c8', 0.6)
+    const frameSteel = paintedSteel('#8a8a8a', 0.6)
+    const hw = brushedMetal('#85888d', 0.9)
+    const plate = brushedMetal('#585b60', 0.9) // fader cover plates (brushed stainless)
     const rubber = new MeshStandardMaterial({ color: '#0c0c0c', roughness: 0.92, metalness: 0 })
-    const paint = new MeshStandardMaterial({ color: '#202225', roughness: 0.6, metalness: 0.55 })
-    return { steel, frameSteel, hw, rubber, paint }
+    const paint = paintedSteel('#3c3e41', 0.35) // corridor conduits / fuse box / pipes / lamp fixture
+    return { steel, frameSteel, hw, plate, rubber, paint }
   }, [])
   useEffect(() => {
-    envOn(mats.steel, 0.55, true); envOn(mats.frameSteel, 0.45, true); envOn(mats.hw, 0.9, true); envOn(mats.paint, 0.5, true)
+    envOn(mats.steel, 0.55, true); envOn(mats.frameSteel, 0.45, true); envOn(mats.hw, 0.9, true); envOn(mats.plate, 0.9, true); envOn(mats.paint, 0.5, true)
   }, [mats])
 
   const hazeMat = useMemo(() => new ShaderMaterial({
@@ -443,9 +445,9 @@ export const Entrance: React.FC<EntranceProps> = ({ zMax, wall, roomWidth, roomH
       {/* per-user volume faders (same level both sides): club side left of the doorway on the back wall, and in the
           corridor on the left wall next to the door (by the fuse box) */}
       <VolumeFader id="vol-in" position={[-(DOOR_W / 2 + 0.45), FADER_Y, zMax]} rotationY={Math.PI} conduit={roomHeight - FADER_Y - 0.17}
-        mats={{ steel: mats.frameSteel, hw: mats.hw, rubber: mats.rubber, paint: mats.paint }} accept={(c) => c.z < zMax + wall / 2} />
+        mats={{ steel: mats.plate, hw: mats.hw, rubber: mats.rubber, paint: mats.paint }} accept={(c) => c.z < zMax + wall / 2} />
       <VolumeFader id="vol-out" position={[-width / 2, FADER_Y, z0 + 0.7]} rotationY={Math.PI / 2} conduit={height - FADER_Y - 0.17}
-        mats={{ steel: mats.frameSteel, hw: mats.hw, rubber: mats.rubber, paint: mats.paint }} accept={(c) => c.z > z0 - 0.05} />
+        mats={{ steel: mats.plate, hw: mats.hw, rubber: mats.rubber, paint: mats.paint }} accept={(c) => c.z > z0 - 0.05} />
 
       {/* caged tungsten bulb + red pilot lamp (emissive cores; halos in the shared HaloField) */}
       <mesh position={[lampPos.x, lampPos.y - 0.045, lampPos.z]}>

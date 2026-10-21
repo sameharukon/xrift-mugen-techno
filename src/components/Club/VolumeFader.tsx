@@ -5,6 +5,7 @@ import { type Group, type Material, type Mesh, MeshBasicMaterial, Plane, Raycast
 import { setVolume, volume } from '../../techno/volume'
 import { allocHalo, setHalo } from './fx'
 import { Builder, box, cyl, rbox, T } from './geo'
+import { BRUSH_TILE, PAINT_TILE } from './textures'
 
 /**
  * Per-user volume fader: a small scuffed steel plate on a painted back box (conduit up to the ceiling),
@@ -29,7 +30,7 @@ const plane = new Plane()
 const _p = new Vector3(), _n = new Vector3(), _c = new Vector3()
 
 function faderGeometry(conduit: number) {
-  const steel = new Builder(), hw = new Builder(), dark = new Builder(), paint = new Builder()
+  const steel = new Builder(BRUSH_TILE), hw = new Builder(BRUSH_TILE), dark = new Builder(), paint = new Builder(PAINT_TILE, false, 1.3) // mounted at 1.3 m
   // painted back box + conduit up to the ceiling (+ a strap)
   paint.add(rbox(PW + 0.022, PH + 0.03, 0.03, 0.006), T(0, 0, 0.015))
   paint.add(cyl(0.011, 0.011, conduit, 8), T(0, PH / 2 + 0.015 + conduit / 2, 0.016))

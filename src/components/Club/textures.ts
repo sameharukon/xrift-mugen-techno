@@ -103,16 +103,22 @@ function valueNoise(N: number, grid: number, seed0: number): Float32Array {
   let seed = seed0
   const rnd = () => ((seed = (Math.imul(seed, 1103515245) + 12345) | 0) >>> 0) / 4294967296
   const g: number[] = Array.from({ length: grid * grid }, rnd)
-  const at = (x: number, y: number) => g[((y + grid) % grid) * grid + ((x + grid) % grid)]
+  // v16: per-axis cell indices + smoothstep weights precomputed once (same maths / results, ~5× faster)
+  const i0 = new Int32Array(N), i1 = new Int32Array(N), w = new Float64Array(N)
+  for (let x = 0; x < N; x++) {
+    const fx = (x / N) * grid, ix = Math.floor(fx)
+    let tx = fx - ix
+    tx = tx * tx * (3 - 2 * tx)
+    i0[x] = (ix + grid) % grid; i1[x] = (ix + 1 + grid) % grid; w[x] = tx
+  }
   const out = new Float32Array(N * N)
-  for (let y = 0; y < N; y++)
+  for (let y = 0; y < N; y++) {
+    const r0 = i0[y] * grid, r1 = i1[y] * grid, ty = w[y]
     for (let x = 0; x < N; x++) {
-      const fx = (x / N) * grid, fy = (y / N) * grid
-      const ix = Math.floor(fx), iy = Math.floor(fy)
-      let tx = fx - ix, ty = fy - iy
-      tx = tx * tx * (3 - 2 * tx); ty = ty * ty * (3 - 2 * ty)
-      out[y * N + x] = (at(ix, iy) * (1 - tx) + at(ix + 1, iy) * tx) * (1 - ty) + (at(ix, iy + 1) * (1 - tx) + at(ix + 1, iy + 1) * tx) * ty
+      const a = i0[x], b = i1[x], tx = w[x]
+      out[y * N + x] = (g[r0 + a] * (1 - tx) + g[r0 + b] * tx) * (1 - ty) + (g[r1 + a] * (1 - tx) + g[r1 + b] * tx) * ty
     }
+  }
   return out
 }
 /** sum of octaves of tileable noise in 0..1 */
@@ -210,15 +216,6 @@ export const caseRoughness = () => once('caseR', () => {
   return dataTex(d, N)
 })
 export const caseNormal = () => once('caseN', () => normalFrom(fbm(128, [[64, 1], [128, 0.8]], 2024), 128, 1.2))
-/** brushed metal (anisotropic look via stretched noise) → roughness map */
-export const brushedRoughness = () => once('brush', () => {
-  const N = 64
-  let s = 99; const rnd = () => ((s = (Math.imul(s, 1103515245) + 12345) | 0) >>> 0) / 4294967296
-  const rows = Array.from({ length: N }, rnd)
-  const d = new Uint8Array(N * N * 4)
-  for (let y = 0; y < N; y++) for (let x = 0; x < N; x++) d.set([0, Math.round(255 * (0.3 + 0.25 * rows[y] + 0.05 * rnd())), 0, 255], (y * N + x) * 4)
-  return dataTex(d, N)
-})
 /** soft tileable noise for haze sheets / beam dust (R: large, G: fine) */
 export const hazeNoise = () => once('haze', () => {
   const N = 128
@@ -228,73 +225,218 @@ export const hazeNoise = () => once('haze', () => {
   return dataTex(d, N)
 })
 
-// ================================================================ v13: weathered industrial steel (entrance door / frame)
-const steelFields = (() => {
-  let cache: { N: number; rust: Float32Array; grime: Float32Array; dents: Float32Array; scratch: Float32Array; streak: Float32Array } | null = null
+// ================================================================ v16: metals (metre-based UVs, see geo.ts metalUV)
+/** brushed-metal texture tile size (m): 512 px → ~1.6 mm / px */
+export const BRUSH_TILE = 0.8
+/** painted-steel texture tile size (m): one tile spans door height (V = world height, grime towards the floor) */
+export const PAINT_TILE = 2.4
+
+/** linear 0..1 → sRGB byte (LUT; the per-pixel Math.pow was the slowest part of generation) */
+const SRGB_LUT = (() => { const t = new Uint8Array(4097); for (let i = 0; i <= 4096; i++) t[i] = Math.round(255 * Math.pow(i / 4096, 1 / 2.2)); return t })()
+const srgb8 = (v: number) => SRGB_LUT[Math.round(Math.min(1, Math.max(0, v)) * 4096)]
+/** like normalFrom (sqrt instead of hypot, preallocated writes) — used by the v16 maps only, so older maps stay bit-identical */
+function normalFast(h: Float32Array, N: number, strength: number): DataTexture {
+  const d = new Uint8Array(N * N * 4)
+  for (let y = 0; y < N; y++) {
+    const ym = ((y - 1 + N) % N) * N, yp = ((y + 1) % N) * N, yc = y * N
+    for (let x = 0; x < N; x++) {
+      const xm = (x - 1 + N) % N, xp = (x + 1) % N
+      const dx = (h[yc + xp] - h[yc + xm]) * strength, dy = (h[yp + x] - h[ym + x]) * strength
+      const il = 1 / Math.sqrt(dx * dx + dy * dy + 1), o = (yc + x) * 4
+      d[o] = Math.round((-dx * il * 0.5 + 0.5) * 255); d[o + 1] = Math.round((-dy * il * 0.5 + 0.5) * 255); d[o + 2] = Math.round((il * 0.5 + 0.5) * 255); d[o + 3] = 255
+    }
+  }
+  return dataTex(d, N)
+}
+const lcg = (seed: number) => { let s = seed; return () => ((s = (Math.imul(s, 1103515245) + 12345) | 0) >>> 0) / 4294967296 }
+/** tileable anisotropic value noise: gx cells across, gy cells down (gy ≫ gx → long horizontal streaks) */
+function anisoNoise(N: number, gx: number, gy: number, seed: number): Float32Array {
+  const rnd = lcg(seed)
+  const g = new Float32Array(gx * gy).map(rnd)
+  const out = new Float32Array(N * N)
+  for (let y = 0; y < N; y++) {
+    const fy = (y / N) * gy, iy = Math.floor(fy); let ty = fy - iy; ty = ty * ty * (3 - 2 * ty)
+    const r0 = (iy % gy) * gx, r1 = ((iy + 1) % gy) * gx
+    for (let x = 0; x < N; x++) {
+      const fx = (x / N) * gx, ix = Math.floor(fx); let tx = fx - ix; tx = tx * tx * (3 - 2 * tx)
+      const x0 = ix % gx, x1 = (ix + 1) % gx
+      out[y * N + x] = (g[r0 + x0] * (1 - tx) + g[r0 + x1] * tx) * (1 - ty) + (g[r1 + x0] * (1 - tx) + g[r1 + x1] * tx) * ty
+    }
+  }
+  return out
+}
+/** antialiased soft stroke (wrapping): writes max(f, val · coverage) */
+function stroke(f: Float32Array, N: number, x0: number, y0: number, ang: number, len: number, w: number, val: number) {
+  const dx = Math.cos(ang), dy = Math.sin(ang)
+  const r = Math.ceil(w + 1)
+  for (let j = 0; j <= len; j += 1) {
+    const t = j / len, taper = Math.min(1, t * 6, (1 - t) * 6) // thin out at both ends
+    const cx = x0 + dx * j, cy = y0 + dy * j
+    for (let oy = -r; oy <= r; oy++) for (let ox = -r; ox <= r; ox++) {
+      const px = Math.floor(cx) + ox, py = Math.floor(cy) + oy
+      const d = Math.abs((px + 0.5 - cx) * -dy + (py + 0.5 - cy) * dx) // distance across the stroke
+      const c = Math.max(0, 1 - d / w) * taper * val
+      if (c <= 0) continue
+      const i = ((py % N + N) % N) * N + ((px % N + N) % N)
+      if (c > f[i]) f[i] = c
+    }
+  }
+}
+
+/** brushed steel / aluminium: shared fields (brushing grain, smudges + fingerprints, fine scratches, grime) */
+const brushFields = (() => {
+  let cache: { N: number; grain: Float32Array; smudge: Float32Array; scratch: Float32Array; grime: Float32Array } | null = null
   return () => {
     if (cache) return cache
-    const N = 256
-    const rustN = fbm(N, [[6, 1], [16, 0.7], [64, 0.45]], 9001)
-    const grime = fbm(N, [[4, 1], [24, 0.5]], 9002)
-    const dents = fbm(N, [[5, 1], [12, 0.5]], 9003)
-    const rust = new Float32Array(N * N)
-    const scratch = new Float32Array(N * N)
-    const streak = new Float32Array(N * N)
-    for (let i = 0; i < rust.length; i++) {
-      const y = Math.floor(i / N) / N // 0 = bottom
-      rust[i] = Math.min(1, Math.max(0, (rustN[i] - 0.6 + 0.1 * (1 - y) * (1 - y)) * 3.5)) * 0.8
-    }
-    let s = 31; const rnd = () => ((s = (Math.imul(s, 1103515245) + 12345) | 0) >>> 0) / 4294967296
-    // rust run-off streaks (downwards from random sources) and bright scuff scratches
-    for (let k = 0; k < 46; k++) {
-      const x0 = Math.floor(rnd() * N), y0 = Math.floor(N * (0.3 + 0.7 * rnd())), len = Math.floor(N * (0.08 + 0.35 * rnd())), w = 1 + Math.floor(rnd() * 2)
-      for (let j = 0; j < len; j++) for (let dx = 0; dx < w; dx++) {
-        const y = y0 - j; if (y < 0) break
-        const i = y * N + ((x0 + dx + Math.round(Math.sin(j * 0.05 + k) * 1.5)) % N + N) % N
-        streak[i] = Math.max(streak[i], (1 - j / len) * 0.8)
+    const N = 512
+    // grain: long streaks of varying length (few cells across, hundreds down), plus per-row hairlines
+    const a = anisoNoise(N, 3, 170, 7101), b = anisoNoise(N, 7, 340, 7102), c = anisoNoise(N, 2, 512, 7103)
+    const grain = new Float32Array(N * N)
+    for (let i = 0; i < grain.length; i++) grain[i] = 0.4 * a[i] + 0.35 * b[i] + 0.25 * c[i]
+    // smudges: soft wiped patches + elliptical fingerprints (whorl rings), greasy = smoother and slightly darker
+    const wipe = fbm(N, [[3, 1], [6, 0.6], [12, 0.3]], 7104)
+    const smudge = new Float32Array(N * N)
+    for (let i = 0; i < N * N; i++) smudge[i] = Math.min(1, Math.max(0, (wipe[i] - 0.52) * 3))
+    const rnd = lcg(7105)
+    for (let k = 0; k < 14; k++) {
+      const cx = rnd() * N, cy = rnd() * N, rx = 9 + rnd() * 9, ry = rx * (1.25 + 0.3 * rnd()), rot = rnd() * Math.PI, str = 0.35 + 0.4 * rnd()
+      const R = Math.ceil(ry + 2), cr = Math.cos(rot), sr = Math.sin(rot)
+      for (let oy = -R; oy <= R; oy++) for (let ox = -R; ox <= R; ox++) {
+        const u = (ox * cr + oy * sr) / rx, v = (-ox * sr + oy * cr) / ry, d = Math.hypot(u, v)
+        if (d >= 1) continue
+        const ridge = 0.5 + 0.5 * Math.cos(d * 26 + u * 3) // whorl ridges
+        const val = str * (1 - d * d) * (0.55 + 0.45 * ridge)
+        const i = (((Math.floor(cy) + oy) % N + N) % N) * N + (((Math.floor(cx) + ox) % N + N) % N)
+        smudge[i] = Math.max(smudge[i], val)
       }
     }
-    for (let k = 0; k < 120; k++) {
-      let x = rnd() * N, y = rnd() * N * (rnd() < 0.6 ? 0.45 : 1)
-      const a = (rnd() - 0.5) * 1.2 + (rnd() < 0.5 ? 0 : Math.PI / 2), len = 3 + rnd() * 22
-      for (let j = 0; j < len; j++) { scratch[((Math.floor(y) + N) % N) * N + ((Math.floor(x) + N) % N)] = 1; x += Math.cos(a); y += Math.sin(a) }
+    // fine scratches: mostly along the grain (±8°), a few random, low contrast, soft edges
+    const scratch = new Float32Array(N * N)
+    for (let k = 0; k < 70; k++) {
+      const along = rnd() < 0.75
+      const ang = along ? (rnd() - 0.5) * 0.28 + (rnd() < 0.5 ? 0 : Math.PI) : rnd() * Math.PI * 2
+      stroke(scratch, N, rnd() * N, rnd() * N, ang, 10 + rnd() * (along ? 90 : 35), 0.7 + rnd() * 0.6, 0.25 + 0.5 * rnd())
     }
-    cache = { N, rust, grime, dents, scratch, streak }
+    const grime = fbm(N, [[2, 1], [5, 0.7], [20, 0.25]], 7106)
+    cache = { N, grain, smudge, scratch, grime }
     return cache
   }
 })()
-/** sRGB albedo: dark blue-grey painted steel, worn edges, rust patches + run-off, grime towards the floor */
-export const steelColor = () => once('stC', () => {
-  const { N, rust, grime, scratch, streak } = steelFields()
+/** brushed metal albedo multiplier (sRGB, near white): greasy smudges and grime slightly darker, scratches brighter */
+export const brushedColor = () => once('brC', () => {
+  const { N, grain, smudge, scratch, grime } = brushFields()
   const d = new Uint8Array(N * N * 4)
-  for (let i = 0; i < rust.length; i++) {
-    const y = Math.floor(i / N) / N
-    const g = 0.75 + 0.35 * grime[i] - 0.25 * Math.max(0, 0.25 - y) * 4 * (0.5 + grime[i])
-    let r = 0.27 * g, gg = 0.285 * g, b = 0.31 * g
-    const ru = Math.max(rust[i], streak[i] * 0.7)
-    r = r * (1 - ru) + 0.2 * ru; gg = gg * (1 - ru) + 0.12 * ru; b = b * (1 - ru) + 0.085 * ru
-    if (scratch[i]) { r = r * 0.4 + 0.42 * 0.6; gg = gg * 0.4 + 0.43 * 0.6; b = b * 0.4 + 0.45 * 0.6 }
-    d.set([r, gg, b].map((v) => Math.round(255 * Math.pow(Math.min(1, v), 1 / 2.2))).concat(255), i * 4)
+  for (let i = 0; i < N * N; i++) {
+    const v = Math.min(1, 0.9 + 0.06 * (grain[i] - 0.5) - 0.1 * smudge[i] - 0.14 * Math.max(0, grime[i] - 0.45) + 0.08 * scratch[i])
+    const c8 = srgb8(v), o = i * 4
+    d[o] = d[o + 1] = d[o + 2] = c8; d[o + 3] = 255
   }
   return dataTex(d, N, true)
 })
-/** G = roughness (rust rough, scratches polished), B = metalness (paint/rust low, bare scratches high) */
-export const steelRM = () => once('stRM', () => {
-  const { N, rust, grime, scratch, streak } = steelFields()
+/** brushed metal roughness (G): 0.34 ± grain, smudges / grime rougher-or-greasy, scratches cut through */
+export const brushedRM = () => once('brRM', () => {
+  const { N, grain, smudge, scratch, grime } = brushFields()
+  const d = new Uint8Array(N * N * 4)
+  for (let i = 0; i < N * N; i++) {
+    const r = 0.36 + 0.12 * (grain[i] - 0.5) + 0.14 * smudge[i] + 0.12 * Math.max(0, grime[i] - 0.5) - 0.1 * scratch[i]
+    d.set([0, Math.round(255 * Math.min(0.85, Math.max(0.2, r))), 0, 255], i * 4)
+  }
+  return dataTex(d, N)
+})
+/** brushing grooves (across the grain only) + scratch grooves: subtle, use normalScale ≈ 0.3 */
+export const brushedNormal = () => once('brN', () => {
+  const { N, grain, scratch } = brushFields()
+  const h = new Float32Array(N * N)
+  for (let i = 0; i < h.length; i++) h[i] = grain[i] * 0.6 - scratch[i] * 0.5
+  return normalFast(h, N, 1.6)
+})
+
+// ================================================================ weathered industrial steel (entrance door / frame / fittings)
+// v16: 512 px over PAINT_TILE (2.4 m, V = height), dielectric paint (metalness 0) with bare-steel scratches,
+// antialiased low-contrast scratches concentrated where hands / feet / carts hit, greasy hand smudges at handle height
+const steelFields = (() => {
+  let cache: { N: number; rust: Float32Array; grime: Float32Array; dents: Float32Array; scratch: Float32Array; streak: Float32Array; hand: Float32Array; tone: Float32Array } | null = null
+  return () => {
+    if (cache) return cache
+    const N = 512
+    const rustN = fbm(N, [[6, 1], [16, 0.7], [64, 0.45]], 9001)
+    const grime = fbm(N, [[4, 1], [24, 0.5]], 9002)
+    const dents = fbm(N, [[5, 1], [12, 0.5]], 9003)
+    const handN = fbm(N, [[8, 1], [24, 0.5]], 9005)
+    const toneN = fbm(N, [[3, 1], [9, 0.6], [40, 0.2]], 9007)
+    const rust = new Float32Array(N * N)
+    const scratch = new Float32Array(N * N)
+    const streak = new Float32Array(N * N)
+    const hand = new Float32Array(N * N)
+    for (let i = 0; i < rust.length; i++) {
+      const y = Math.floor(i / N) / N // 0 = floor … 1 = 2.4 m
+      rust[i] = Math.min(1, Math.max(0, (rustN[i] - 0.6 + 0.16 * Math.max(0, 1 - y * 5)) * 3.2)) * 0.75
+      // greasy hand zone ≈ 0.85 … 1.35 m
+      const band = Math.exp(-(((y - 0.46) / 0.09) ** 2))
+      hand[i] = Math.min(1, Math.max(0, (handN[i] - 0.45) * 2.5)) * band
+    }
+    const rnd = lcg(31)
+    // faint rust run-off below a few rust spots (soft, 2–4 px wide)
+    for (let k = 0; k < 22; k++) {
+      const x0 = rnd() * N, y0 = N * (0.25 + 0.6 * rnd()), len = N * (0.04 + 0.16 * rnd())
+      stroke(streak, N, x0, y0, -Math.PI / 2 + (rnd() - 0.5) * 0.05, len, 1.5 + rnd() * 2, 0.35 + 0.3 * rnd())
+    }
+    // scuffs in clusters (a boot / cart / ring hits several parallel fine lines at once), mostly in the kick zone and
+    // at handle height; lengths, angles, spacing and depth all vary; plus a few isolated nicks
+    for (let k = 0; k < 46; k++) {
+      const zone = rnd()
+      const y = zone < 0.45 ? rnd() * 0.16 : zone < 0.8 ? 0.36 + rnd() * 0.2 : rnd()
+      const x = rnd() * N, base = (rnd() - 0.5) * (rnd() < 0.7 ? 0.5 : 2.5)
+      const lines = 1 + Math.floor(rnd() * rnd() * 7), len0 = 5 + rnd() * rnd() * 45, depth = 0.15 + 0.45 * rnd()
+      for (let l = 0; l < lines; l++) {
+        const off = (l - lines / 2) * (1.2 + rnd() * 2.2)
+        const a = base + (rnd() - 0.5) * 0.06
+        stroke(scratch, N, x - Math.sin(a) * off + (rnd() - 0.5) * 6, y * N + Math.cos(a) * off, a, len0 * (0.4 + 0.6 * rnd()), 0.5 + rnd() * 0.5, depth * (0.4 + 0.6 * rnd()))
+      }
+    }
+    for (let k = 0; k < 40; k++) stroke(scratch, N, rnd() * N, rnd() * N, rnd() * Math.PI * 2, 1.5 + rnd() * 4, 0.6 + rnd() * 0.5, 0.15 + 0.35 * rnd())
+    const tone = toneN
+    cache = { N, rust, grime, dents, scratch, streak, hand, tone }
+    return cache
+  }
+})()
+/** sRGB albedo: dark blue-grey paint (albedo already accounts for metalness 0), rust, scratches = bare steel */
+export const steelColor = () => once('stC', () => {
+  const { N, rust, grime, scratch, streak, hand, tone } = steelFields()
   const d = new Uint8Array(N * N * 4)
   for (let i = 0; i < rust.length; i++) {
+    const y = Math.floor(i / N) / N
+    const g = (0.86 + 0.24 * (tone[i] - 0.5)) * (0.78 + 0.3 * grime[i] - 0.35 * Math.max(0, 0.12 - y) / 0.12 * (0.5 + grime[i])) * (1 - 0.12 * hand[i])
+    let r = 0.16 * g, gg = 0.167 * g, b = 0.182 * g
     const ru = Math.max(rust[i], streak[i] * 0.6)
-    let rough = 0.5 + 0.2 * grime[i] + 0.35 * ru, metal = 0.55 - 0.4 * ru
-    if (scratch[i]) { rough = 0.28; metal = 0.95 }
+    r = r * (1 - ru) + 0.13 * ru; gg = gg * (1 - ru) + 0.075 * ru; b = b * (1 - ru) + 0.05 * ru
+    const s = scratch[i]
+    r = r * (1 - s) + 0.36 * s; gg = gg * (1 - s) + 0.36 * s; b = b * (1 - s) + 0.37 * s
+    const o = i * 4
+    d[o] = srgb8(r); d[o + 1] = srgb8(gg); d[o + 2] = srgb8(b); d[o + 3] = 255
+  }
+  return dataTex(d, N, true)
+})
+/** G = roughness (paint satin 0.55–0.75, greasy hands smoother, rust rough), B = metalness (paint/rust 0, bare scratches 0.9) */
+export const steelRM = () => once('stRM', () => {
+  const { N, rust, grime, scratch, streak, hand } = steelFields()
+  const d = new Uint8Array(N * N * 4)
+  for (let i = 0; i < rust.length; i++) {
+    const ru = Math.max(rust[i], streak[i] * 0.5), s = scratch[i]
+    let rough = 0.44 + 0.2 * grime[i] - 0.14 * hand[i]
+    rough = rough * (1 - ru) + 0.9 * ru
+    rough = rough * (1 - s) + 0.34 * s
+    const metal = 0.9 * s * (1 - ru)
     d.set([0, Math.round(255 * Math.min(1, rough)), Math.round(255 * Math.max(0, metal)), 255], i * 4)
   }
   return dataTex(d, N)
 })
-/** soft dents + pitted rust */
+/** soft dents, faint orange-peel paint, pitted rust (restrained: normalScale ≈ 0.5) */
 export const steelNormal = () => once('stN', () => {
-  const { N, rust, dents } = steelFields()
-  const fine = fbm(N, [[96, 1], [128, 0.7]], 9004)
+  const { N, rust, dents, scratch } = steelFields()
+  const fine = fbm(N, [[96, 1], [192, 0.7]], 9004)
+  const peel = fbm(N, [[128, 1]], 9006)
   const h = new Float32Array(N * N)
-  for (let i = 0; i < h.length; i++) h[i] = dents[i] * 0.6 + rust[i] * (fine[i] - 0.5) * 0.6 + rust[i] * 0.12
-  return normalFrom(h, N, 2.4)
+  for (let i = 0; i < h.length; i++) h[i] = dents[i] * 0.9 + rust[i] * (fine[i] - 0.5) * 0.5 + rust[i] * 0.08 + peel[i] * 0.03 - scratch[i] * 0.04
+  return normalFast(h, N, 2.0)
 })

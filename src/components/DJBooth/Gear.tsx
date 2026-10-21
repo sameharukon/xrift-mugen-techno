@@ -16,7 +16,9 @@ import { RoundedBoxGeometry } from 'three/examples/jsm/geometries/RoundedBoxGeom
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js'
 import { beat } from '../../techno/beat'
 import { envOn } from '../Club/fx'
-import { brushedRoughness, caseNormal, caseRoughness } from '../Club/textures'
+import { BRUSH_TILE, caseNormal, caseRoughness } from '../Club/textures'
+import { brushedMetal } from '../Club/metal'
+import { metalUV } from '../Club/geo'
 
 const TOP = 1.0
 const DEV_Z = -0.2
@@ -31,10 +33,13 @@ const PHONES = place(-0.88, -0.12, 0.5)
 class Builder {
   parts: BufferGeometry[] = []
   extra: Record<string, number[]> = {}
+  /** `tile` (m): metre-based box-projected UVs (v16, see Club/geo.ts metalUV) */
+  constructor(private tile = 0) {}
   add(g: BufferGeometry, local: Matrix4, dev?: Matrix4, attrs?: Record<string, number[]>) {
     const m = dev ? dev.clone().multiply(local) : local
     let geo = g.index ? g.toNonIndexed() : g
     geo.applyMatrix4(m)
+    if (this.tile) geo = metalUV(geo, this.tile, true)
     if (!geo.getAttribute('uv')) geo.setAttribute('uv', new BufferAttribute(new Float32Array(geo.getAttribute('position').count * 2), 2))
     if (attrs) for (const [k, v] of Object.entries(attrs)) {
       const n = geo.getAttribute('position').count
@@ -63,7 +68,7 @@ const CDJ_SCREEN = { y: 0.094, z: -0.1215, tilt: 0.42, w: 0.15, h: 0.088 }
 
 function buildGear() {
   const body = new Builder() // satin black plastics / cabinets / cables
-  const metal = new Builder() // brushed aluminium: case hardware, bezels, plates, slots
+  const metal = new Builder(BRUSH_TILE) // brushed aluminium: case hardware, bezels, plates, slots
   const screens = new Builder() // aSeed
   const rings = new Builder() // aDeck + aCenter
   const knobs: Matrix4[] = []
@@ -291,11 +296,11 @@ export const BoothGear: React.FC<{ panelRef: React.RefObject<MeshStandardMateria
     return m
   }, [])
   const caseGeo = useMemo(() => new RoundedBoxGeometry(3.6, 1, 1.2, 3, 0.03), [])
-  const metalMat = useMemo(() => new MeshStandardMaterial({ color: '#8d9096', metalness: 0.92, roughness: 1, roughnessMap: brushedRoughness() }), [])
+  const metalMat = useMemo(() => brushedMetal('#8d9096', 0.92), [])
   const bodyMat = useMemo(() => new MeshStandardMaterial({ color: '#111113', metalness: 0.25, roughness: 0.48 }), [])
   const jogMat = useMemo(() => new MeshStandardMaterial({ color: '#1a1b1e', metalness: 0.7, roughness: 0.3 }), [])
   const capMat = useMemo(() => new MeshStandardMaterial({ color: '#2b2c30', metalness: 0.45, roughness: 0.4 }), [])
-  useEffect(() => { envOn(caseMat, 0.35); envOn(metalMat, 1.6); envOn(bodyMat, 0.6); envOn(jogMat, 1.0); envOn(capMat, 0.7) }, [caseMat, metalMat, bodyMat, jogMat, capMat])
+  useEffect(() => { envOn(caseMat, 0.35); envOn(metalMat, 1.6, false, true); envOn(bodyMat, 0.6); envOn(jogMat, 1.0); envOn(capMat, 0.7) }, [caseMat, metalMat, bodyMat, jogMat, capMat])
 
   const jogGeo = useMemo(() => {
     const b = new Builder()

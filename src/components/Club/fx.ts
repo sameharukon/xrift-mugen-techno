@@ -45,14 +45,22 @@ export function setHalo(i: number, c: Vector3, axis: Vector3 | null, radius: num
 // ---------------------------------------------------------------- environment map registry
 export const envReg = {
   tex: null as Texture | null,
-  mats: [] as { m: MeshStandardMaterial; base: number; always?: boolean }[],
+  /** v16: warm corridor env (one caged tungsten bulb above the door) for the `always` (entrance) materials */
+  texCorr: null as Texture | null,
+  /** v16: the club map the right way up + richer horizon / floor-pool content: used by the metals only (`metal`), so
+   *  non-metal opt-ins (wet floor, case laminate, plastics, screens) keep exactly their v15 look */
+  texMetal: null as Texture | null,
+  mats: [] as { m: MeshStandardMaterial; base: number; always?: boolean; metal?: boolean }[],
 }
 /** opt a material into the club env map; `base` = envMapIntensity at full light (`always`: constant, e.g. the entrance outside the club) */
-export function envOn(m: MeshStandardMaterial | null, base: number, always = false) {
+export function envOn(m: MeshStandardMaterial | null, base: number, always = false, metal = false) {
   if (!m || envReg.mats.some((x) => x.m === m)) return
-  envReg.mats.push({ m, base, always })
-  if (envReg.tex) { m.envMap = envReg.tex; m.envMapIntensity = always ? base : 0; m.needsUpdate = true }
+  envReg.mats.push({ m, base, always, metal })
+  const t = envFor(always, metal)
+  if (t) { m.envMap = t; m.envMapIntensity = always ? base : 0; m.needsUpdate = true }
 }
+
+export const envFor = (always?: boolean, metal?: boolean) => (always ? envReg.texCorr : metal ? envReg.texMetal : envReg.tex)
 
 /** colour temperatures for "fluorescent" sources (cool / neutral / warm-ish), deterministic per index */
 export const TINTS: [number, number, number][] = [[0.87, 0.91, 1.0], [0.95, 0.96, 1.0], [1.0, 0.95, 0.88], [0.9, 0.94, 1.0], [1.0, 0.97, 0.92]]
