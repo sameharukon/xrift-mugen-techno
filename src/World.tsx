@@ -1,5 +1,4 @@
 import { SpawnPoint } from '@xrift/world-components'
-import { RigidBody } from '@react-three/rapier'
 import { useEffect, useMemo, useRef } from 'react'
 import { useFrame, useThree } from '@react-three/fiber'
 import type { Group, Material, Object3D, Texture } from 'three'
@@ -9,6 +8,7 @@ import { DJBooth, type PAStack } from './components/DJBooth'
 import { FloorGlow, LightRig, SceneBackground, SceneFog, TubeWall, useConcrete } from './components/Club'
 import { Crowd } from './components/Club/Crowd'
 import { Entrance } from './components/Club/Entrance'
+import { Bounds } from './components/Club/Bounds'
 import { Ceiling } from './components/Club/Props'
 import { brickNormal, brickTexture } from './components/Club/textures'
 import { ClubEnv, ClubFloor, HaloField, HazeLayers } from './components/Club/Fx'
@@ -122,9 +122,8 @@ export const World: React.FC<WorldProps> = ({ position = [0, 0, 0], scale = 1 })
       {/* ========== 環境（真っ暗。照明は再生中の演出のみ / 地下の小さなクラブ） ========== */}
       <SceneFog color={COLORS.fog} near={3} far={17} />
       <SceneBackground color={COLORS.background} />
-      <RigidBody type="fixed" colliders="cuboid" restitution={0} friction={0}>
-        <ClubFloor width={width} depth={depth} zc={zc} color={COLORS.ground} />
-      </RigidBody>
+      {/* v18: no collider on the visual floor / walls / ceiling — <Bounds> provides one continuous floor slab and thick walls */}
+      <ClubFloor width={width} depth={depth} zc={zc} color={COLORS.ground} />
 
       {/* ========== 壁（レンガ）・低い天井（ダクト / 配管） ========== */}
       {([
@@ -132,18 +131,13 @@ export const World: React.FC<WorldProps> = ({ position = [0, 0, 0], scale = 1 })
         [[-width / 2 - wall / 2, height / 2, zc], [wall, height, depth], brickSide, nSide],
         [[0, height / 2, zMin - wall / 2], [width, height, wall], brickEnd, nEnd],
       ] as const).map(([p, s, map, nmap], i) => (
-        <RigidBody key={i} type="fixed" colliders="cuboid" restitution={0} friction={0}>
-          <mesh position={p as unknown as [number, number, number]}>
-            <boxGeometry args={s as unknown as [number, number, number]} />
-            <meshStandardMaterial map={map} normalMap={nmap} color={COLORS.wall} roughness={0.88} />
-          </mesh>
-        </RigidBody>
-      ))}
-      <RigidBody type="fixed" colliders="cuboid">
-        <mesh position={[0, height + 0.1, zc]} visible={false}>
-          <boxGeometry args={[width, 0.2, depth]} />
+        <mesh key={i} position={p as unknown as [number, number, number]}>
+          <boxGeometry args={s as unknown as [number, number, number]} />
+          <meshStandardMaterial map={map} normalMap={nmap} color={COLORS.wall} roughness={0.88} />
         </mesh>
-      </RigidBody>
+      ))}
+      {/* v18: thick invisible boundary colliders (walls, ceilings + safety caps, floor under everything) */}
+      <Bounds />
       <Ceiling width={width} zMin={zMin} zMax={zMax} height={height} map={ceilMap} />
 
       {/* ========== DJブース（人の中心）・クラウド・照明（全員で同期） ========== */}

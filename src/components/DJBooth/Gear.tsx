@@ -6,7 +6,7 @@
  * Booth-local frame: table top at y = 1.0, the DJ stands at −z and faces +z; devices face the DJ.
  */
 import { useFrame } from '@react-three/fiber'
-import { RigidBody } from '@react-three/rapier'
+import { CuboidCollider, RigidBody } from '@react-three/rapier'
 import { useEffect, useMemo, useRef } from 'react'
 import {
   BoxGeometry, BufferAttribute, type BufferGeometry, CatmullRomCurve3, Color, CylinderGeometry, Euler, InstancedMesh, Matrix4,
@@ -380,9 +380,11 @@ export const BoothGear: React.FC<{ panelRef: React.RefObject<MeshStandardMateria
   return (
     <group>
       {/* flight-case table (collider) */}
-      <RigidBody type="fixed" colliders="cuboid">
-        <mesh position={[0, 0.5, 0]} material={caseMat} geometry={caseGeo} />
+      {/* v18: explicit collider, starting 0.1 m above the floor (the feet sensor never brushes its sides) */}
+      <RigidBody type="fixed" colliders={false}>
+        <CuboidCollider args={[1.8, 0.45, 0.6]} position={[0, 0.55, 0]} />
       </RigidBody>
+      <mesh position={[0, 0.5, 0]} material={caseMat} geometry={caseGeo} />
       <mesh geometry={g.metal} material={metalMat} />
       <mesh geometry={g.body} material={bodyMat} />
       {/* thin deep-red line (kick ambience) on the crowd side of the case */}

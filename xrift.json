@@ -25,8 +25,8 @@
       "**/hls-*.js"
     ],
     "physics": {
-      "gravity": 9.81,
-      "allowInfiniteJump": true
+      "gravity": 15,
+      "allowInfiniteJump": false
     },
     "camera": {
       "near": 0.1,

@@ -1,5 +1,5 @@
 import { Interactable } from '@xrift/world-components'
-import { RigidBody } from '@react-three/rapier'
+import { CuboidCollider, RigidBody } from '@react-three/rapier'
 import { useFrame } from '@react-three/fiber'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import {
@@ -43,6 +43,8 @@ const DOOR_H = 2.15
 const PANEL_W = DOOR_W + 0.16
 const PANEL_H = DOOR_H + 0.08
 const OPEN_S = 1.5
+/** v18: vertical colliders start this far above the floor, so the player's feet (grounded) sensor never touches them */
+const FOOT = 0.1
 const TRIGGER_DIST = 1.15
 /** volume fader centre height (hand height) */
 const FADER_Y = 1.3
@@ -77,7 +79,7 @@ function brickN(map: import('three').Texture) {
   return n
 }
 
-function Box({ p, s, color = '#8a8a8a', map, nmap, collide = true, rough = 0.95, metal = 0 }: {
+function Box({ p, s, color = '#8a8a8a', map, nmap, collide = false, rough = 0.95, metal = 0 }: {
   p: [number, number, number]; s: [number, number, number]; color?: string; map?: import('three').Texture; nmap?: import('three').Texture; collide?: boolean; rough?: number; metal?: number
 }) {
   const m = (
@@ -86,6 +88,7 @@ function Box({ p, s, color = '#8a8a8a', map, nmap, collide = true, rough = 0.95,
       <meshStandardMaterial map={map} normalMap={nmap ?? (map ? brickN(map) : undefined)} color={color} roughness={rough} metalness={metal} />
     </mesh>
   )
+  // v18: visual only by default — the thick boundary colliders live in <Bounds>
   return collide ? <RigidBody type="fixed" colliders="cuboid" restitution={0} friction={0}>{m}</RigidBody> : m
 }
 
@@ -393,6 +396,9 @@ export const Entrance: React.FC<EntranceProps> = ({ zMax, wall, roomWidth, roomH
   })
 
   const yTop = DOOR_H + (roomHeight - DOOR_H) / 2
+  // door collider extent in the door group's z (group at z0 + 0.1): corridor face / depth
+  const DOOR_COL_OUT = 0.26
+  const DOOR_COL_D = DOOR_COL_OUT + 0.1 + wall + 0.12
   return (
     <group ref={group}>
       {/* club back wall with the doorway cut out (brick) */}
@@ -400,17 +406,8 @@ export const Entrance: React.FC<EntranceProps> = ({ zMax, wall, roomWidth, roomH
       <Box p={[DOOR_W / 2 + sideW / 2, roomHeight / 2, zMax + wall / 2]} s={[sideW, roomHeight, wall]} map={brickSide} color="#9a9a9a" />
       <Box p={[0, yTop, zMax + wall / 2]} s={[DOOR_W, roomHeight - DOOR_H, wall]} map={brickLintel} color="#9a9a9a" />
 
-      {/* floor under the doorway (between the club floor and the corridor floor; no visible change) */}
-      <RigidBody type="fixed" colliders="cuboid" restitution={0} friction={0}>
-        <mesh position={[0, -0.1, zMax + wall / 2]} visible={false}>
-          <boxGeometry args={[DOOR_W + 0.3, 0.2, wall + 0.2]} />
-        </mesh>
-      </RigidBody>
-
       {/* corridor: damp concrete floor (patchy roughness, faint glints), low concrete ceiling, brick walls, dead end */}
-      <RigidBody type="fixed" colliders="cuboid" restitution={0} friction={0}>
-        <ClubFloor width={width} depth={length} zc={zc} color="#4e4e4e" repeat={2} env={0.12} always />
-      </RigidBody>
+      <ClubFloor width={width} depth={length} zc={zc} color="#4e4e4e" repeat={2} env={0.12} always />
       <Box p={[0, height + 0.05, zc]} s={[width + 0.6, 0.1, length]} map={ceilMap} nmap={ceilN} color="#3a3a3a" />
       <Box p={[-(width / 2 + 0.15), height / 2, zc]} s={[0.3, height, length]} map={brickCorr} color="#7a7a7a" rough={0.86} />
       <Box p={[width / 2 + 0.15, height / 2, zc]} s={[0.3, height, length]} map={brickCorr} color="#7a7a7a" rough={0.86} />
@@ -425,10 +422,10 @@ export const Entrance: React.FC<EntranceProps> = ({ zMax, wall, roomWidth, roomH
       {/* the door: heavy sliding steel leaf (skin, channels, ribs, rivets, pull bar, lock box, hangers / rollers, rubber kick plate) */}
       <group position={[0, 0, z0 + 0.1]}>
         {solid && (
-          <RigidBody type="fixed" colliders="cuboid">
-            <mesh position={[0, PANEL_H / 2, 0]} visible={false}>
-              <boxGeometry args={[PANEL_W, PANEL_H, 0.12]} />
-            </mesh>
+          // v18: thick door collider (≈ 0.8 m): fills the doorway depth, 12 cm proud of the club-side wall face and 20 cm in
+          // front of the leaf on the corridor side (both still inside the walk-up open triggers) → no tunnelling at low fps
+          <RigidBody type="fixed" colliders={false}>
+            <CuboidCollider args={[PANEL_W / 2, (PANEL_H - FOOT) / 2, DOOR_COL_D / 2]} position={[0, (PANEL_H + FOOT) / 2, DOOR_COL_OUT - DOOR_COL_D / 2]} />
           </RigidBody>
         )}
         <group ref={slide}>
