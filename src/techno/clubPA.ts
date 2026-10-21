@@ -39,6 +39,8 @@ export interface ClubPA {
   input: GainNode
   panners: PannerNode[]
   limiter: DynamicsCompressorNode
+  /** gain into the glue limiter (user boost above 100 % goes here, so peaks are caught by the limiter) */
+  pre: GainNode
   output: GainNode
   reverb: ConvolverNode
 }
@@ -149,6 +151,8 @@ export function buildClubPA(ctx: BaseAudioContext, speakers: PASpeaker[], o: Clu
   limiter.release.value = 0.12
   const output = ctx.createGain()
   output.gain.value = 1
-  bus.connect(limiter).connect(output).connect(dest)
-  return { input, panners, limiter, output, reverb }
+  const pre = ctx.createGain()
+  pre.gain.value = 1
+  bus.connect(pre).connect(limiter).connect(output).connect(dest)
+  return { input, panners, limiter, pre, output, reverb }
 }

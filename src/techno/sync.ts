@@ -83,6 +83,7 @@ export interface SyncState {
   step: number
   offsetMs: number
   resyncs: number
+  rejoins: number
   ffSteps: number
   ffMs: number
 }
@@ -90,6 +91,10 @@ export interface SyncState {
 const LOOKAHEAD = 0.25
 const TICK_MS = 25
 const DRIFT_LIMIT = 0.03
+/** offset change beyond this (s) is a discontinuity (AudioContext suspended / interrupted, long main-thread stall), not drift */
+const JUMP_LIMIT = 0.25
+/** live scheduling fell this far behind the audio clock (s) → re-join instead of replaying the backlog */
+const BEHIND_LIMIT = 0.5
 /** create the next segment's engine this long before it starts (construction off the beat) */
 const PREP_S = 3
 /** FF time slice per tick (ms) so the main thread stays responsive */
@@ -138,6 +143,9 @@ export class PerpetualTechno {
   private samples: number[] = []
   private lastMeasure = 0
   private resyncs = 0
+  private rejoins = 0
+  /** the AudioContext was not running (suspended / interrupted) since the last tick */
+  private stalled = false
   private ffSteps = 0
   private ffStart = 0
   private ffMs = 0
@@ -280,11 +288,36 @@ export class PerpetualTechno {
     }, Math.max(0, (Math.max(t, fadeAt ?? t) - t) * 1000) + 700)
   }
 
+  /**
+   * Clean re-join after a clock discontinuity: the old timeline is faded out (30 ms) and dropped together with its
+   * queued light events, the offset is measured afresh and the current segment is rebuilt by the silent late-join
+   * fast-forward. Without this, resuming a suspended AudioContext (headset menu / sleep, tab in the background) or
+   * a long stall replayed the whole missed backlog live at once (hundreds of steps scheduled in the past → a burst
+   * of sound and a burst of stale light events), and shifted engines kept stale absolute times.
+   */
+  private rejoin() {
+    for (const g of this.segs) this.dropSeg(g, null)
+    this.segs = []
+    this.events.length = 0
+    this.samples = []
+    for (let i = 0; i < 3; i++) this.offset = this.measuredOffset()
+    this.lastMeasure = performance.now()
+    this.status = 'syncing'
+    this.ffSteps = 0
+    this.ffStart = performance.now()
+    this.rejoins++
+  }
+
   private tick = () => {
+    if (this.ctx.state !== 'running') { this.stalled = true; return }
+    if (this.stalled) { this.stalled = false; this.rejoin() }
     const now = this.ctx.currentTime
     const pn = performance.now()
     if (pn - this.lastMeasure > 1000) {
       this.lastMeasure = pn
+      const raw = this.sampleOffset()
+      // a fresh sample far off the current offset = discontinuity (the median filter would take seconds to follow)
+      if (this.samples.length >= 3 && Math.abs(raw - this.offset) > JUMP_LIMIT && Math.abs(this.sampleOffset() - this.offset) > JUMP_LIMIT) { this.rejoin(); return }
       const o = this.measuredOffset()
       if (this.samples.length >= 3 && Math.abs(o - this.offset) > DRIFT_LIMIT) {
         const delta = this.offset - o
@@ -307,6 +340,8 @@ export class PerpetualTechno {
       this.segs.push(this.makeSeg(last.k + 1))
       return // construction is heavy: schedule on the next tick
     }
+    // live scheduling fell far behind the audio clock (main thread stalled while audio kept running) → re-join
+    if (this.status === 'live' && this.segs.some((g) => g.started && this.canStep(g) && g.eng.nextTime < now - BEHIND_LIMIT)) { this.rejoin(); return }
     // silent fast-forward of a segment that is behind (late join), time-sliced
     const t0 = performance.now()
     for (const g of this.segs) {
@@ -361,8 +396,8 @@ export class PerpetualTechno {
 
   getState(): SyncState {
     const g = this.lead()
-    const base = { offsetMs: Math.round(this.offset * 1000), resyncs: this.resyncs, ffSteps: this.ffSteps, ffMs: this.ffMs }
-    if (!g) return { ...base, status: 'idle', seg: -1, bpm: BANDS[FIXED_BAND].start, bar: 0, step: 0 }
+    const base = { offsetMs: Math.round(this.offset * 1000), resyncs: this.resyncs, rejoins: this.rejoins, ffSteps: this.ffSteps, ffMs: this.ffMs }
+    if (!g) return { ...base, status: this.status === 'syncing' ? 'syncing' : 'idle', seg: -1, bpm: BANDS[FIXED_BAND].start, bar: 0, step: 0 }
     return { ...base, status: this.status, seg: g.k, bpm: g.eng.bpm, bar: g.eng.bar, step: g.eng.step }
   }
 

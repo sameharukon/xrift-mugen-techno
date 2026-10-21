@@ -56,3 +56,21 @@ export function envOn(m: MeshStandardMaterial | null, base: number, always = fal
 
 /** colour temperatures for "fluorescent" sources (cool / neutral / warm-ish), deterministic per index */
 export const TINTS: [number, number, number][] = [[0.87, 0.91, 1.0], [0.95, 0.96, 1.0], [1.0, 0.95, 0.88], [0.9, 0.94, 1.0], [1.0, 0.97, 0.92]]
+
+// ---------------------------------------------------------------- shader clock (float32-safe)
+/**
+ * Seconds for time-animated shaders, wrapped to a short period. Raw `performance.now() / 1000` keeps growing for as
+ * long as the page is open; on the GPU (float32, and mobile sin / fract / texture-coordinate precision) large time
+ * values make noise scrolls, mist wavering and twinkles step and jitter more and more the longer a session runs.
+ *  - texture-noise scrolls: every speed used × PERIOD is a whole number of (tiling) texture repeats → the wrap is seamless
+ *  - procedural noise (crowd mist): crossfade over FADE s into the field evaluated at (t − PERIOD), which is exactly
+ *    where the next period starts → continuous
+ *  - corridor dust: dims out / back in around the wrap (`vis`)
+ */
+export const SHADER_PERIOD = 1000
+const FADE = 8
+export function shaderClock(nowMs = performance.now()) {
+  const t = (nowMs / 1000) % SHADER_PERIOD
+  const s = (x: number) => { const v = Math.min(1, Math.max(0, x)); return v * v * (3 - 2 * v) }
+  return { t, fade: s((t - (SHADER_PERIOD - FADE)) / FADE), vis: s(t / (FADE / 2)) * (1 - s((t - (SHADER_PERIOD - FADE / 2)) / (FADE / 2))) }
+}

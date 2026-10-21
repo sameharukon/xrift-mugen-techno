@@ -3,6 +3,7 @@ import { useLayoutEffect, useMemo, useRef } from 'react'
 import { AdditiveBlending, Color, InstancedBufferAttribute, InstancedMesh, LatheGeometry, Object3D, ShaderMaterial, SphereGeometry, Vector2 } from 'three'
 import { beat } from '../../techno/beat'
 import { meter } from './index'
+import { SHADER_PERIOD, shaderClock } from './fx'
 
 // ---------------------------------------------------------------- mist material
 /**
@@ -14,6 +15,8 @@ import { meter } from './index'
 const MIST_VERT = /* glsl */ `
 uniform float uInflate;
 uniform float uTime;
+uniform float uFade;
+uniform float uPeriod;
 uniform float uWaver;
 /** per figure: x = noise phase offset, y = drift speed ×, z = noise scale × (no two figures waver alike) */
 attribute vec3 aMist;
@@ -27,6 +30,11 @@ float vnoiseV(vec3 x) {
   return mix(mix(mix(vhash(i), vhash(i + vec3(1, 0, 0)), f.x), mix(vhash(i + vec3(0, 1, 0)), vhash(i + vec3(1, 1, 0)), f.x), f.y),
              mix(mix(vhash(i + vec3(0, 0, 1)), vhash(i + vec3(1, 0, 1)), f.x), mix(vhash(i + vec3(0, 1, 1)), vhash(i + vec3(1, 1, 1)), f.x), f.y), f.z);
 }
+/** x: fine wavering, y: slow sway, z: depth drift — for one (wrapped) time value */
+vec3 waver(vec3 wp, vec3 seed, float tm) {
+  vec3 q = wp * vec3(2.6, 1.6, 2.6) * aMist.z + seed + vec3(0.0, -tm * 0.55, tm * 0.08);
+  return vec3(vnoiseV(q) * 0.65 + vnoiseV(q * 2.1 + 4.3) * 0.35, vnoiseV(q * 0.7 + vec3(9.1, -tm * 0.25, 2.7)), vnoiseV(q * 0.6 + 13.7));
+}
 void main() {
   mat4 m = modelMatrix * instanceMatrix;
   vec3 n = normalize(mat3(m) * normal);
@@ -35,10 +43,10 @@ void main() {
   // per-instance phase from the instance position; field scrolls upward (rising flow)
   vec3 seed = vec3(instanceMatrix[3].x * 1.7, 0.0, instanceMatrix[3].z * 1.3) + aMist.x * vec3(7.3, 3.1, 5.9);
   float up = clamp(wp.y / 1.75, 0.0, 1.0);
-  float tm = uTime * aMist.y;
-  vec3 q = wp.xyz * vec3(2.6, 1.6, 2.6) * aMist.z + seed + vec3(0.0, -tm * 0.55, tm * 0.08);
-  float d = vnoiseV(q) * 0.65 + vnoiseV(q * 2.1 + 4.3) * 0.35;      // 0..1
-  float d2 = vnoiseV(q * 0.7 + vec3(9.1, -tm * 0.25, 2.7));      // slow, large-scale sway
+  // wrapped time (float32-safe); crossfade into the next period's start near the wrap (uFade)
+  vec3 W = waver(wp.xyz, seed, uTime * aMist.y);
+  if (uFade > 0.0) W = mix(W, waver(wp.xyz, seed, (uTime - uPeriod) * aMist.y), uFade);
+  float d = W.x, d2 = W.y, d3 = W.z;
   // stronger at the silhouette (normal ⟂ view) and towards the upper body; feet stay planted
   vec3 toCam = normalize(cameraPosition - wp.xyz);
   float edge = 1.0 - abs(dot(n, toCam));
@@ -46,7 +54,7 @@ void main() {
   wp.xyz += n * ((d - 0.45) * 0.07 * amp + uInflate);
   // whole figure drifts a few cm like smoke, more at the top
   wp.x += (d2 - 0.5) * 0.05 * up * uWaver;
-  wp.z += (vnoiseV(q * 0.6 + 13.7) - 0.5) * 0.04 * up * uWaver;
+  wp.z += (d3 - 0.5) * 0.04 * up * uWaver;
   // wisps trail upward at the edges of the upper body
   wp.y += smoothstep(0.55, 0.95, d) * 0.07 * edge * up * up * uWaver;
   vN = n;
@@ -56,6 +64,8 @@ void main() {
 }`
 const MIST_FRAG = /* glsl */ `
 uniform float uTime;
+uniform float uFade;
+uniform float uPeriod;
 uniform float uLit;
 uniform float uWhite;
 uniform float uRed;
@@ -73,6 +83,11 @@ float vnoise(vec3 x) {
   return mix(mix(mix(hash(i), hash(i + vec3(1, 0, 0)), f.x), mix(hash(i + vec3(0, 1, 0)), hash(i + vec3(1, 1, 0)), f.x), f.y),
              mix(mix(hash(i + vec3(0, 0, 1)), hash(i + vec3(1, 0, 1)), f.x), mix(hash(i + vec3(0, 1, 1)), hash(i + vec3(1, 1, 1)), f.x), f.y), f.z);
 }
+/** x: wisp density fbm, y: edge-tear noise — scrolled by one (wrapped) time value */
+vec2 mistNoise(vec3 p, float t) {
+  vec3 q = p * 1.8 + vec3(0.0, -t * 0.4, t * 0.15);
+  return vec2(0.55 * vnoise(q) + 0.3 * vnoise(q * 2.1 + 7.1) + 0.15 * vnoise(q * 4.3 - 3.7), vnoise(p * 3.4 + vec3(1.3, -t * 0.6, 4.1)));
+}
 void main() {
   if (uLit < 0.002) discard;
   vec3 V = normalize(cameraPosition - vWP);
@@ -82,11 +97,11 @@ void main() {
   // the silhouette so the outline dissolves instead of reading as an edge
   float body = 1.0 - smoothstep(0.15, 0.95, fres);           // thickest where we look through the middle
   float rim = smoothstep(0.0, 0.8, fres) * (1.0 - smoothstep(0.35, 0.9, fres));
-  vec3 q = vWP * 1.8 + vec3(0.0, -uTime * 0.4, uTime * 0.15);
-  float n = 0.55 * vnoise(q) + 0.3 * vnoise(q * 2.1 + 7.1) + 0.15 * vnoise(q * 4.3 - 3.7);
-  float wisp = smoothstep(0.2, 0.9, n);
+  vec2 N = mistNoise(vWP, uTime);
+  if (uFade > 0.0) N = mix(N, mistNoise(vWP, uTime - uPeriod), uFade); // wrapped time: seamless crossfade
+  float wisp = smoothstep(0.2, 0.9, N.x);
   // edge breakup: towards the outline the density is gated by a second scrolling noise
-  float tear = smoothstep(0.25, 0.75, vnoise(vWP * 3.4 + vec3(1.3, -uTime * 0.6, 4.1)));
+  float tear = smoothstep(0.25, 0.75, N.y);
   // core almost see-through; rim haze; noise tears it into drifting wisps; feet dissolve into the floor haze
   float a = (0.09 * body + 0.14 * rim) * (0.2 + 1.0 * wisp) * mix(1.0, tear, smoothstep(0.3, 0.9, fres));
   // feet / legs nearly invisible: density ramps in from the knees up
@@ -106,6 +121,8 @@ function mistMaterial(layer: 0 | 1) {
     fragmentShader: MIST_FRAG,
     uniforms: {
       uTime: { value: 0 },
+      uFade: { value: 0 },
+      uPeriod: { value: SHADER_PERIOD },
       uLit: { value: 0 },
       uWhite: { value: 0 },
       uRed: { value: 0 },
@@ -315,8 +332,10 @@ export const Crowd: React.FC<{ figures?: CrowdFigure[] }> = ({ figures }) => {
     meter('crowdWhite', wv)
     beat.whiteEnv = wv
     meter('crowdRed', beat.redHit)
+    const sc = shaderClock(now)
     for (const m of mats) {
-      m.uniforms.uTime.value = now / 1000
+      m.uniforms.uTime.value = sc.t
+      m.uniforms.uFade.value = sc.fade
       m.uniforms.uLit.value = litG
       m.uniforms.uWhite.value = wv
       m.uniforms.uRed.value = Math.min(1, beat.redHit)

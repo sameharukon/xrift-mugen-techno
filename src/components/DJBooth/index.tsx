@@ -6,7 +6,7 @@ import { BANDS } from '../../techno/engine'
 import { BoothGear } from './Gear'
 import { beat } from '../../techno/beat'
 import { buildClubPA, type ClubPA } from '../../techno/clubPA'
-import { volume, volumeGain } from '../../techno/volume'
+import { volume, volumeStages } from '../../techno/volume'
 import { FIXED_BAND, PerpetualTechno, segIndexAt, segStartMs } from '../../techno/sync'
 import { club } from '../../techno/club'
 
@@ -44,10 +44,13 @@ interface AudioRig {
   /** per-user volume (after the limiter and the door muffle → applies inside and outside) */
   vol: GainNode
   volLevel: number
+  ceil: WaveShaperNode
 }
 
 /** closed door: low-pass corner (Hz) and level of the PA as heard from the corridor */
 const MUFFLE_HZ = 160
+/** a step event heard this late (s) only updates state; its light hits are dropped */
+const STALE_S = 0.35
 const MUFFLE_GAIN = 0.45
 /** fully inside: effectively no filter */
 const OPEN_HZ = 20000
@@ -57,6 +60,27 @@ const NO_AUDIO_FALLBACK_MS = 2500
 const tmpA = new Vector3()
 const tmpB = new Vector3()
 const tmpC = new Vector3()
+
+/** waveshaper curve for ±2.0 full scale (fed ×0.5): identity up to -1 dBFS, tanh knee to a -0.1 dBFS ceiling */
+function softCeilingCurve(n = 4097) {
+  const c = new Float32Array(n)
+  const k = 0.891, top = 0.989
+  for (let i = 0; i < n; i++) {
+    const a = ((i / (n - 1)) * 2 - 1) * 2
+    const m = Math.abs(a)
+    c[i] = Math.sign(a) * (m <= k ? m : k + (top - k) * Math.tanh((m - k) / (top - k)))
+  }
+  return c
+}
+
+/** fader → cut after the limiter (≤ 100 %) / boost into the limiter (> 100 %), ≈ 40 ms glide (no clicks) */
+function applyVolume(r: AudioRig, l: number) {
+  const [cut, boost] = volumeStages(l)
+  const t = r.ctx.currentTime
+  r.volLevel = l
+  r.vol.gain.setTargetAtTime(cut, t, 0.04)
+  r.pa.pre.gain.setTargetAtTime(boost, t, 0.04)
+}
 
 function setParam(p: AudioParam | undefined, v: number, t: number) {
   if (p) p.setTargetAtTime(v, t, 0.03)
@@ -141,8 +165,15 @@ export const DJBooth: React.FC<DJBoothProps> = ({ position = [0, 0, 0], rotation
       const muffleGain = ctx.createGain()
       muffleGain.gain.value = MUFFLE_GAIN
       const vol = ctx.createGain()
-      vol.gain.value = volumeGain(volume.level)
-      muffle.connect(muffleGain).connect(vol).connect(ctx.destination)
+      vol.gain.value = volumeStages(volume.level)[0]
+      // safety ceiling: transparent below -1 dBFS, soft knee to -0.1 dBFS above (only the rare boosted peak that
+      // slips past the glue limiter is touched → never hard digital clipping, even at 200 %)
+      const ceilIn = ctx.createGain()
+      ceilIn.gain.value = 0.5
+      const ceil = ctx.createWaveShaper()
+      ceil.curve = softCeilingCurve()
+      ceil.oversample = '2x'
+      muffle.connect(muffleGain).connect(vol).connect(ceilIn).connect(ceil).connect(ctx.destination)
       // club PA: mono low bed + stereo mid/high bed + spatial stacks + basement reverb (see clubPA.ts)
       const pa = buildClubPA(ctx, paRef.current.map((s) => ({ side: s.side })), {}, muffle)
       const input = pa.input
@@ -154,9 +185,10 @@ export const DJBooth: React.FC<DJBoothProps> = ({ position = [0, 0, 0], rotation
       anaTrim.gain.value = 0.6 / input.gain.value
       input.connect(anaTrim).connect(analyser)
       const sync = new PerpetualTechno(ctx, input, () => clockRef.current.now() + (import.meta.env.DEV ? Number((globalThis as Record<string, unknown>).__clockSkewMs) || 0 : 0))
-      rig.current = { ctx, input, pa, analyser, freq: new Uint8Array(analyser.frequencyBinCount), sync, muffle, muffleGain, vol, volLevel: volume.level }
+      rig.current = { ctx, input, pa, analyser, freq: new Uint8Array(analyser.frequencyBinCount), sync, muffle, muffleGain, vol, volLevel: volume.level, ceil }
       if (import.meta.env.DEV) (globalThis as Record<string, unknown>).__techno = rig.current
-      volume.onChange = (l) => { const R = rig.current; if (R) { R.volLevel = l; R.vol.gain.setTargetAtTime(volumeGain(l), R.ctx.currentTime, 0.04) } }
+      pa.pre.gain.value = volumeStages(volume.level)[1]
+      volume.onChange = (l) => { const R = rig.current; if (R) applyVolume(R, l) }
     }
     const r = rig.current
     const go = () => {
@@ -244,7 +276,7 @@ export const DJBooth: React.FC<DJBoothProps> = ({ position = [0, 0, 0], rotation
       r.muffle.frequency.setTargetAtTime(MUFFLE_HZ * Math.pow(OPEN_HZ / MUFFLE_HZ, 1 - m), t, 0.08)
       r.muffleGain.gain.setTargetAtTime(MUFFLE_GAIN + (1 - MUFFLE_GAIN) * (1 - m), t, 0.08)
       // volume fader: short exponential approach (≈ 40 ms) → no zipper noise / clicks
-      if (r.volLevel !== volume.level) { r.volLevel = volume.level; r.vol.gain.setTargetAtTime(volumeGain(volume.level), t, 0.04) }
+      if (r.volLevel !== volume.level) applyVolume(r, volume.level)
     }
 
     // ---- musical events → visual state (released on the audio clock, when they are heard) ----
@@ -267,7 +299,10 @@ export const DJBooth: React.FC<DJBoothProps> = ({ position = [0, 0, 0], rotation
       let brk = beat.breakAmt > 0.5, riser = 0, energy = beat.energy, tension = beat.tension
       while (ev.length && ev[0].t <= heard) {
         const e = ev.shift()!
+        if (import.meta.env.DEV) { const D = ((globalThis as Record<string, unknown>).__lightStats ??= { n: 0, kicks: 0, lagSum: 0, lagMax: 0, qMax: 0 }) as { n: number; kicks: number; lagSum: number; lagMax: number; qMax: number }; D.n++; if (e.kick > 0) { D.kicks++; const lag = heard - e.t; D.lagSum += lag; D.lagMax = Math.max(D.lagMax, lag) } D.qMax = Math.max(D.qMax, ev.length + 1) }
         if (!club.entered) continue // outside: the music runs (muffled), the club stays dark
+        // stale (rendering was paused / stalled): keep the musical state, but don't fire hits late (no light bursts)
+        if (heard - e.t > STALE_S) { if (import.meta.env.DEV) ((globalThis as Record<string, unknown>).__lightStats as { stale?: number }).stale = (((globalThis as Record<string, unknown>).__lightStats as { stale?: number }).stale || 0) + 1; beat.step = e.step; beat.bar = e.bar; brk = e.brk; energy = e.energy; tension = e.tension; beat.chill = e.chill; continue }
         beat.step = e.step
         beat.bar = e.bar
         if (e.kick > 0) { beat.kick = Math.min(1, 0.6 + 0.4 * e.kick); beat.kickN++ }
@@ -321,6 +356,9 @@ export const DJBooth: React.FC<DJBoothProps> = ({ position = [0, 0, 0], rotation
         if (step % 8 === 4) { beat.clap = 0.6; beat.clapN++ }
       }
       for (let b = 0; b < 16; b++) beat.levels[b] = (0.25 + 0.5 * beat.kick * (1 - b / 20)) * (0.6 + 0.4 * Math.sin(b * 1.3 + tt * 3))
+    } else if (st && st.status === 'syncing' && st.rejoins > 0 && club.entered) {
+      // short silent re-join after a clock discontinuity (≈ 0.5 s): keep the room lit, hits just decay
+      beat.riser = 0; beat.preDrop = 0
     } else {
       beat.active = false
       beat.audible = false

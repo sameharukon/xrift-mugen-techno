@@ -5,7 +5,7 @@ import {
   MeshBasicMaterial, MeshStandardMaterial, PointLight, ShaderMaterial, SphereGeometry, TorusGeometry, Vector3,
 } from 'three'
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js'
-import { allocHalo, envOn, fx, setHalo, TINTS } from './fx'
+import { allocHalo, envOn, fx, setHalo, shaderClock, TINTS } from './fx'
 import { beat } from '../../techno/beat'
 import { concreteTexture, hazeNoise, radialTexture } from './textures'
 
@@ -299,6 +299,7 @@ export const LightRig: React.FC<LightRigProps> = ({ position = [0, 4.2, 0], widt
     const groove = 1 - beat.breakAmt
     const T = tr.current
     const t = performance.now() / 1000
+    const tw = shaderClock().t // shader time: wrapped (float32-safe; seamless, tiling noise texture)
     decayAll(beamEnv.current, delta, 11)
     decayAll(tubeEnv.current, delta, 16)
     decayAll(strobeEnv.current, delta, 28) // strobe: ~25 ms to half → sharp pop
@@ -359,7 +360,7 @@ export const LightRig: React.FC<LightRigProps> = ({ position = [0, 4.2, 0], widt
       meter(`beam${i}`, v)
       const I = 0.9 * v * G
       mat.uniforms.uI.value = I
-      mat.uniforms.uTime.value = t + i * 7.3
+      mat.uniforms.uTime.value = tw + i * 7.3
       const lm = lensMats.current[i]
       if (lm) lm.color.copy(PALETTE.cold).multiplyScalar(0.02 * G + 1.3 * I)
       g.updateMatrixWorld()

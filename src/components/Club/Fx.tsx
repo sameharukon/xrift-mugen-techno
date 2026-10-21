@@ -6,7 +6,7 @@ import {
 } from 'three'
 import { beat } from '../../techno/beat'
 import { PALETTE, useConcrete } from '.'
-import { envOn, envReg, fx, halo, HALO_CAP, MAX_BEAMS } from './fx'
+import { envOn, envReg, fx, halo, HALO_CAP, MAX_BEAMS, shaderClock } from './fx'
 import { concreteNormal, floorRoughness, hazeNoise } from './textures'
 
 // ================================================================ dark environment map
@@ -175,7 +175,7 @@ export const HazeLayers: React.FC<HazeProps> = ({ width, zMin, zMax, heights = [
     },
   })), [heights, wallZ])
   useFrame(() => {
-    const t = performance.now() / 1000
+    const t = shaderClock().t // wrapped (float32-safe; seamless: tiling noise texture)
     const lit = beat.lit * (1 - beat.preDrop)
     for (const m of mats) {
       const U = m.uniforms

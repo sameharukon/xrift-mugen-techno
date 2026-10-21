@@ -9,7 +9,7 @@ import {
 import { beat } from '../../techno/beat'
 import { club } from '../../techno/club'
 import { useConcrete } from '.'
-import { allocHalo, envOn, setHalo } from './fx'
+import { allocHalo, envOn, setHalo, shaderClock } from './fx'
 import { ClubFloor } from './Fx'
 import { VolumeFader } from './VolumeFader'
 import { box, Builder, cyl, rbox, T } from './geo'
@@ -48,8 +48,16 @@ const FADER_Y = 1.3
 /** the listener must stay in the trigger zone this long (s), and not in the first seconds after load (spawn settling) */
 const TRIGGER_HOLD = 0.3
 const TRIGGER_GRACE = 2.5
+/** auto-close: the listener has been clear of the doorway on the far side this long (s) */
+const CLOSE_DELAY = 1.2
+/** … or stayed inside the club after opening the door from inside (changed their mind) */
+const CLOSE_DELAY_SAME_SIDE = 4
+/** inside: walking up to the door opens it (narrow zone straight in front of the opening) */
+const INSIDE_TRIGGER = 0.75
 
 const tmp = new Vector3()
+/** last listener position (door-local), for open() called from an interaction */
+const tmp2 = new Vector3()
 
 function useBrick(w: number, h: number) {
   return useMemo(() => {
@@ -211,7 +219,7 @@ void main() {
   gl_FragColor = vec4(uCol * uI * fall * smoothstep(0.25, 0.85, n) * smoothstep(0.2, 1.0, d), 1.0);
 }`
 const DUST_VERT = /* glsl */ `
-attribute float aSeed; uniform float uTime; uniform float uKick; uniform vec3 uLamp; uniform float uPx;
+attribute float aSeed; uniform float uTime; uniform float uVis; uniform float uKick; uniform vec3 uLamp; uniform float uPx;
 varying float vA;
 void main() {
   vec3 p = position;
@@ -221,6 +229,7 @@ void main() {
   p.y = mod(p.y - t * 0.35 + uKick * 0.004 * fract(aSeed * 3.1), 1.6) + 0.75;
   vec3 o = p - uLamp; o.y *= 0.7;
   vA = exp(-dot(o, o) * 1.6) * (0.5 + 0.5 * sin(uTime * 1.3 + aSeed * 40.0)) + uKick * 0.25 * exp(-dot(o, o));
+  vA *= uVis;
   vec4 mv = viewMatrix * modelMatrix * vec4(p, 1.0);
   gl_PointSize = uPx * (0.004 + 0.003 * fract(aSeed * 13.0)) / -mv.z;
   gl_Position = projectionMatrix * mv;
@@ -278,7 +287,7 @@ export const Entrance: React.FC<EntranceProps> = ({ zMax, wall, roomWidth, roomH
     g.computeBoundingSphere()
     const m = new ShaderMaterial({
       vertexShader: DUST_VERT, fragmentShader: DUST_FRAG, transparent: true, depthWrite: false, blending: AdditiveBlending, toneMapped: false,
-      uniforms: { uTime: { value: 0 }, uKick: { value: 0 }, uLamp: { value: lampPos }, uPx: { value: 700 }, uCol: { value: [WARM.r, WARM.g * 0.95, WARM.b * 0.9] } },
+      uniforms: { uTime: { value: 0 }, uVis: { value: 1 }, uKick: { value: 0 }, uLamp: { value: lampPos }, uPx: { value: 700 }, uCol: { value: [WARM.r, WARM.g * 0.95, WARM.b * 0.9] } },
     })
     return { g, m }
   }, [z0, lampPos])
@@ -296,9 +305,15 @@ export const Entrance: React.FC<EntranceProps> = ({ zMax, wall, roomWidth, roomH
   const age = useRef(0)
   const wpos = useMemo(() => new Vector3(), [])
 
+  /** which side the listener was on when the door last started opening (auto-close fires once they are clear on the other side) */
+  const openedFrom = useRef<'in' | 'out'>('out')
+  const closeFor = useRef(0)
+  const nearInFor = useRef(0)
   const open = () => {
     if (opening.current) return
     opening.current = true
+    openedFrom.current = tmp2.z > (zMax + z0) / 2 ? 'out' : 'in'
+    closeFor.current = 0
     club.entered = true
     setSolid(false)
   }
@@ -310,15 +325,38 @@ export const Entrance: React.FC<EntranceProps> = ({ zMax, wall, roomWidth, roomH
     camera.getWorldPosition(tmp)
     if (group.current) group.current.worldToLocal(tmp)
     if (import.meta.env.DEV) (globalThis as Record<string, unknown>).__camLocal = [+tmp.x.toFixed(2), +tmp.y.toFixed(2), +tmp.z.toFixed(2)]
+    tmp2.copy(tmp)
     const near = tmp.z > z0 - 0.2 && tmp.z - z0 < TRIGGER_DIST && Math.abs(tmp.x) < width / 2 + 0.3
     age.current += delta
     nearFor.current = near && age.current > TRIGGER_GRACE ? nearFor.current + delta : 0
     if (nearFor.current > TRIGGER_HOLD && club.audio) open()
+    // inside: walking straight up to the closed door opens it again (way back out); clicking it works too
+    const nearIn = club.entered && tmp.z < zMax + 0.05 && tmp.z > zMax - INSIDE_TRIGGER && Math.abs(tmp.x) < DOOR_W / 2 - 0.05
+    nearInFor.current = nearIn ? nearInFor.current + delta : 0
+    if (nearInFor.current > TRIGGER_HOLD) open()
+    // the door closes behind you: never while anyone (this listener) is in the doorway; reverses if they step in
+    const inDoorway = Math.abs(tmp.x) < DOOR_W / 2 + 0.1 && tmp.z > zMax - 0.7 && tmp.z < z0 + 0.7
+    const clearIn = tmp.z < zMax - 0.7
+    const clearOut = tmp.z > z0 + TRIGGER_DIST + 0.15
+    if (opening.current) {
+      const far = openedFrom.current === 'out' ? clearIn : clearOut
+      // changed your mind / walked away on the side you opened it from: close a bit later
+      const same = openedFrom.current === 'in' ? clearIn : clearOut
+      closeFor.current = !inDoorway && (far || same) ? closeFor.current + delta : 0
+      if (closeFor.current > (far ? CLOSE_DELAY : CLOSE_DELAY_SAME_SIDE)) { opening.current = false; nearInFor.current = 0 }
+    } else if (club.door > 0 && inDoorway) {
+      opening.current = false
+      open()
+    }
     // 0 inside the club .. 1 in the corridor
     const x = Math.min(1, Math.max(0, (tmp.z - (zMax - 0.8)) / (z0 + 0.8 - (zMax - 0.8))))
     club.outside = x * x * (3 - 2 * x)
     // door animation (ease in-out, heavy)
     if (opening.current) club.door = Math.min(1, club.door + delta / OPEN_S)
+    else if (club.door > 0) {
+      club.door = Math.max(0, club.door - delta / OPEN_S)
+      if (club.door === 0) setSolid(true)
+    }
     const d = club.door
     const e = d < 0.5 ? 4 * d * d * d : 1 - Math.pow(-2 * d + 2, 3) / 2
     // muffled kicks behind the closed door: the leaf rattles a hair in its track (≈1.5 mm), dust jumps a little
@@ -343,9 +381,11 @@ export const Entrance: React.FC<EntranceProps> = ({ zMax, wall, roomWidth, roomH
       group.current.localToWorld(wpos.copy(pilotPos).add(tmp.set(0, 0, 0.03)))
       setHalo(halos.pilot, wpos, null, 0.11, 0.7 * pl, 0.85, 0.06, 0.07)
     }
-    hazeMat.uniforms.uTime.value = tt
+    const sc = shaderClock()
+    hazeMat.uniforms.uTime.value = sc.t // wrapped: float32-safe, seamless (tiling noise)
     hazeMat.uniforms.uI.value = 0.13 * fl * (0.4 + 0.6 * club.outside)
-    dust.m.uniforms.uTime.value = tt
+    dust.m.uniforms.uTime.value = sc.t
+    dust.m.uniforms.uVis.value = sc.vis // dims out / in around the wrap (random per-particle speeds)
     dust.m.uniforms.uKick.value = thump
     dust.m.uniforms.uPx.value = gl.domElement.height * 1.2
   })
@@ -357,6 +397,13 @@ export const Entrance: React.FC<EntranceProps> = ({ zMax, wall, roomWidth, roomH
       <Box p={[-(DOOR_W / 2 + sideW / 2), roomHeight / 2, zMax + wall / 2]} s={[sideW, roomHeight, wall]} map={brickSide} color="#9a9a9a" />
       <Box p={[DOOR_W / 2 + sideW / 2, roomHeight / 2, zMax + wall / 2]} s={[sideW, roomHeight, wall]} map={brickSide} color="#9a9a9a" />
       <Box p={[0, yTop, zMax + wall / 2]} s={[DOOR_W, roomHeight - DOOR_H, wall]} map={brickLintel} color="#9a9a9a" />
+
+      {/* floor under the doorway (between the club floor and the corridor floor; no visible change) */}
+      <RigidBody type="fixed" colliders="cuboid" restitution={0} friction={0}>
+        <mesh position={[0, -0.1, zMax + wall / 2]} visible={false}>
+          <boxGeometry args={[DOOR_W + 0.3, 0.2, wall + 0.2]} />
+        </mesh>
+      </RigidBody>
 
       {/* corridor: damp concrete floor (patchy roughness, faint glints), low concrete ceiling, brick walls, dead end */}
       <RigidBody type="fixed" colliders="cuboid" restitution={0} friction={0}>

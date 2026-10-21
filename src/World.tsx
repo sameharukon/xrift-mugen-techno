@@ -67,7 +67,9 @@ const CullWhileClosed: React.FC<{ children: React.ReactNode }> = ({ children }) 
     }
     if (show) {
       if (!S.shown) { root.traverse((o) => { if (isRenderable(o as Renderable)) o.visible = true }); S.shown = true }
-      S.warm = -1
+      // the interior has now been drawn for real: everything is compiled / uploaded → hiding it again later
+      // (door closes behind you, back in the corridor) needs no new warm-up
+      if (S.warm !== -2) S.warm = WARM_CHUNKS
       return
     }
     // hidden: keep every renderable (also newly mounted ones) invisible
