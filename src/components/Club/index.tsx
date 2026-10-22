@@ -2,13 +2,14 @@ import { useFrame, useThree } from '@react-three/fiber'
 import { useEffect, useMemo, useRef } from 'react'
 import {
   AdditiveBlending, BoxGeometry, type BufferGeometry, Color, CylinderGeometry, DoubleSide, Euler, Fog, Group, InstancedMesh, Matrix4, Mesh,
-  MeshBasicMaterial, MeshStandardMaterial, PointLight, ShaderMaterial, SphereGeometry, TorusGeometry, Vector3,
+  MeshBasicMaterial, MeshStandardMaterial, PointLight, Quaternion, ShaderMaterial, SphereGeometry, TorusGeometry, Vector3,
 } from 'three'
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js'
 import { allocHalo, envOn, fx, setHalo, shaderClock, TINTS } from './fx'
 import { beat } from '../../techno/beat'
 import { BRUSH_TILE, concreteTexture, hazeNoise, radialTexture } from './textures'
 import { metalUV } from './geo'
+import { TUBE_DECAY, TUBE_HALO_I, TUBE_HALO_R, TUBE_IDLE, tubeDir, tubeGeometry, tubeMaterial, WALL_TUBES, wallFixtures, wallTubeMatrix } from './tubes'
 import { brushedMetal } from './metal'
 
 /**
@@ -190,6 +191,20 @@ void main() {
 const _v = new Vector3()
 const _w = new Vector3()
 const _ax = new Vector3()
+const _m4 = new Matrix4()
+
+// v19: nothing on a perfect grid — small deterministic offsets for the heads, strobes and hanging tubes (rigged by hand)
+const headX = (i: number, width: number) => (i - (HEADS - 1) / 2) * (width / (HEADS - 1)) + (hash2(i, 501) - 0.5) * 0.14
+const strobeX = (i: number, width: number) => (i - (STROBES - 1) / 2) * ((width + 0.6) / (STROBES - 1)) + (hash2(i, 502) - 0.5) * 0.12
+/** hanging tube i: centre + a slight hang angle (z) and twist (y); the wires and end caps follow it */
+function rigTube(i: number, width: number) {
+  const x = (i - (TUBES - 1) / 2) * ((width + 0.4) / TUBES) + (hash2(i, 503) - 0.5) * 0.12
+  return { x, y: -0.2 - hash2(i, 504) * 0.05, z: 0.25 + (hash2(i, 505) - 0.5) * 0.03, rz: (hash2(i, 506) - 0.5) * 0.05, ry: (hash2(i, 507) - 0.5) * 0.06 }
+}
+const rigTubeMatrix = (i: number, width: number, len = 1.2) => {
+  const t = rigTube(i, width)
+  return new Matrix4().compose(new Vector3(t.x, t.y, t.z), new Quaternion().setFromEuler(new Euler(0, t.ry, Math.PI / 2 + t.rz)), new Vector3(1, len, 1))
+}
 
 /** static truss + yokes + strobe housings + tube holders → one merged geometry (one draw) */
 function rigStaticGeometry(trussLen: number, width: number) {
@@ -224,7 +239,7 @@ function rigStaticGeometry(trussLen: number, width: number) {
   }
   // moving-head bases (clamped under the truss) + yokes
   for (let i = 0; i < HEADS; i++) {
-    const x = (i - (HEADS - 1) / 2) * (width / (HEADS - 1))
+    const x = headX(i, width)
     cyl(0.014, 0.08, x, -H - 0.03, 0) // clamp rod
     box(0.3, 0.07, 0.22, x, -H - 0.1, 0) // base
     box(0.05, 0.03, 0.05, x, -H - 0.06, 0.08)
@@ -232,20 +247,25 @@ function rigStaticGeometry(trussLen: number, width: number) {
     box(0.025, 0.2, 0.06, x - 0.13, -H - 0.25, 0) // yoke arms
     box(0.025, 0.2, 0.06, x + 0.13, -H - 0.25, 0)
   }
-  // strobe housings on top of the truss
+  // strobe housings on top of the truss (each clamped at its own slight angle)
   for (let i = 0; i < STROBES; i++) {
-    const x = (i - (STROBES - 1) / 2) * ((width + 0.6) / (STROBES - 1))
-    box(0.44, 0.17, 0.1, x, H + 0.1, 0.12)
-    box(0.36, 0.02, 0.04, x, H + 0.2, 0.12)
+    const x = strobeX(i, width), a = (hash2(i, 508) - 0.5) * 0.06
+    box(0.44, 0.17, 0.1, x, H + 0.1, 0.12, a)
+    box(0.36, 0.02, 0.04, x, H + 0.2, 0.12, a)
     box(0.05, 0.05, 0.12, x - 0.17, H + 0.03, 0.12)
     box(0.05, 0.05, 0.12, x + 0.17, H + 0.03, 0.12)
   }
-  // tube holders: two thin hangers + end caps per tube
+  // tube holders: two hanging wires (to the truss's lower chord) + end caps, following each tube's hang
   for (let i = 0; i < TUBES; i++) {
-    const x = (i - (TUBES - 1) / 2) * ((width + 0.4) / TUBES)
+    const M = rigTubeMatrix(i, width, 1)
     for (const s of [-1, 1]) {
-      cyl(0.004, 0.2, x + s * 0.45, -0.1, 0.25 - 0.05, 0, 0, 4)
-      cyl(0.04, 0.05, x + s * 0.625, -0.2, 0.25, 0, Math.PI / 2, 8)
+      const w = new Vector3(0, s * 0.45, 0).applyMatrix4(M)
+      const top = -H + 0.02, len = top - w.y
+      cyl(0.004, len, w.x, w.y + len / 2, w.z - 0.03, 0, 0, 4)
+      const c = new Vector3(0, s * 0.625, 0).applyMatrix4(M)
+      const g = new CylinderGeometry(0.04, 0.04, 0.05, 12, 1)
+      g.applyMatrix4(new Matrix4().compose(c, new Quaternion().setFromRotationMatrix(M), new Vector3(1, 1, 1)))
+      parts.push(g)
     }
   }
   const nonIdx = parts.map((g) => metalUV(g, BRUSH_TILE, true)) // v16: metre-based UVs for the brushed texture set
@@ -302,7 +322,7 @@ export const LightRig: React.FC<LightRigProps> = ({ position = [0, 4.2, 0], widt
     const t = performance.now() / 1000
     const tw = shaderClock().t // shader time: wrapped (float32-safe; seamless, tiling noise texture)
     decayAll(beamEnv.current, delta, 11)
-    decayAll(tubeEnv.current, delta, 16)
+    decayAll(tubeEnv.current, delta, TUBE_DECAY) // v19: same envelope as the wall tubes
     decayAll(strobeEnv.current, delta, 28) // strobe: ~25 ms to half → sharp pop
     const chaseOn = beat.riser > 0
     // --- triggers on new 16th steps ---
@@ -375,20 +395,20 @@ export const LightRig: React.FC<LightRigProps> = ({ position = [0, 4.2, 0], widt
     const rg = root.current
     let glowMax = 0
     for (let i = 0; i < TUBES; i++) {
-      const v = Math.min(1, tubeEnv.current.v[i] + drop)
+      const te = tubeEnv.current.v[i]
+      const v = Math.min(1, te * te + drop)
       meter(`tube${i}`, v)
       // fluorescent character: faint 2-tone shimmer + rare tiny dips (never brighter than the hit)
       const fl = 1 - 0.035 * (0.5 + 0.5 * Math.sin(t * 43 + i * 2.3)) * (0.5 + 0.5 * Math.sin(t * 3.1 + i)) - (hash2(Math.floor(t * 12), i + 41) < 0.03 ? 0.18 : 0)
       const [r, gg, b] = TINTS[i % TINTS.length]
-      const k = (0.015 + v) * G * fl
+      const k = (TUBE_IDLE + v) * G * fl
       glowMax = Math.max(glowMax, v * G)
       if (tubes.current) tubes.current.setColorAt(i, tmpCol.setRGB(PALETTE.cold.r * r * k, PALETTE.cold.g * gg * k, PALETTE.cold.b * b * k))
       if (rg) {
-        const x = (i - (TUBES - 1) / 2) * ((width + 0.4) / TUBES)
-        rg.localToWorld(_v.set(x, -0.2, 0.25))
-        rg.localToWorld(_w.set(x + 0.6, -0.2, 0.25))
-        _ax.subVectors(_w, _v)
-        setHalo(slots.tube[i], _v, _ax, 0.2, 0.7 * k, r, gg, b)
+        _m4.multiplyMatrices(rg.matrixWorld, tubeMatrices[i])
+        _v.setFromMatrixPosition(_m4)
+        _ax.set(0, 0.5, 0).applyMatrix4(_m4).sub(_v) // half the tube along its axis
+        setHalo(slots.tube[i], _v.addScaledVector(_w.set(0, 0, 1).transformDirection(rg.matrixWorld), 0.03), _ax, TUBE_HALO_R, TUBE_HALO_I * k, r, gg, b)
       }
     }
     if (tubes.current?.instanceColor) tubes.current.instanceColor.needsUpdate = true
@@ -400,8 +420,7 @@ export const LightRig: React.FC<LightRigProps> = ({ position = [0, 4.2, 0], widt
       const k = v * G
       if (strobes.current) strobes.current.setColorAt(i, tmpCol.copy(PALETTE.white).multiplyScalar(k))
       if (rg) {
-        const x = (i - (STROBES - 1) / 2) * ((width + 0.6) / (STROBES - 1))
-        rg.localToWorld(_v.set(x, 0.25, 0.18))
+        rg.localToWorld(_v.set(strobeX(i, width), 0.25, 0.18))
         _ax.set(0.16, 0, 0)
         setHalo(slots.strobe[i], _v, _ax, 0.3, 0.9 * k, 1, 1, 1)
       }
@@ -418,10 +437,10 @@ export const LightRig: React.FC<LightRigProps> = ({ position = [0, 4.2, 0], widt
     // tiny, short-range white spill from the strobes onto the truss/booth only (no room fill)
     if (strobeLight.current) strobeLight.current.intensity = spill * sMax * G
   })
-  const tubeMatrices = useMemo(() => Array.from({ length: TUBES }, (_, i) => new Matrix4().makeRotationZ(Math.PI / 2).setPosition((i - (TUBES - 1) / 2) * ((width + 0.4) / TUBES), -0.2, 0.25)), [width])
-  const strobeMatrices = useMemo(() => Array.from({ length: STROBES }, (_, i) => new Matrix4().setPosition((i - (STROBES - 1) / 2) * ((width + 0.6) / (STROBES - 1)), 0.25, 0.175)), [width])
+  const tubeMatrices = useMemo(() => Array.from({ length: TUBES }, (_, i) => rigTubeMatrix(i, width)), [width])
+  const strobeMatrices = useMemo(() => Array.from({ length: STROBES }, (_, i) => new Matrix4().makeRotationZ((hash2(i, 508) - 0.5) * 0.06).setPosition(strobeX(i, width), 0.25, 0.175)), [width])
   return (
-    <group position={position} ref={root}>
+    <group position={position} rotation={[0, 0.012, 0.007]} ref={root}>
       {/* box truss, moving-head bases / yokes, strobe housings, tube hangers (one merged mesh) */}
       <mesh geometry={staticGeo} material={trussMat} />
       {/* strobe panels (instanced) */}
@@ -432,12 +451,9 @@ export const LightRig: React.FC<LightRigProps> = ({ position = [0, 4.2, 0], widt
       </instancedMesh>
       {/* fluorescent tubes hanging in front of the truss (instanced, per-tube colour temperature) */}
       <instancedMesh ref={(m) => { if (m && !m.instanceColor) { tubeMatrices.forEach((M, i) => { m.setMatrixAt(i, M); m.setColorAt(i, tmpCol.set(0, 0, 0)) }) } (tubes as React.MutableRefObject<InstancedMesh | null>).current = m }}
-        args={[undefined, undefined, TUBES]} frustumCulled={false}>
-        <cylinderGeometry args={[0.028, 0.028, 1.2, 10]} />
-        <meshBasicMaterial toneMapped={false} />
-      </instancedMesh>
+        args={[tubeGeometry(), tubeMaterial(), TUBES]} frustumCulled={false} />
       {Array.from({ length: HEADS }, (_, i) => (
-        <group key={i} position={[(i - (HEADS - 1) / 2) * (width / (HEADS - 1)), -0.4, 0]} ref={(g) => { groups.current[i] = g }}>
+        <group key={i} position={[headX(i, width), -0.4, 0]} ref={(g) => { groups.current[i] = g }}>
           <mesh geometry={headGeo}>
             <meshStandardMaterial ref={i === 0 ? headMat : undefined} color="#141518" metalness={0.6} roughness={0.38} />
           </mesh>
@@ -456,84 +472,90 @@ export const LightRig: React.FC<LightRigProps> = ({ position = [0, 4.2, 0], widt
   )
 }
 
-// ---------------------------------------------------------------- back wall: vertical fluorescent tubes (low-res equalizer)
+// ---------------------------------------------------------------- back wall: hand-installed fluorescent tubes (low-res equalizer)
 export interface TubeWallProps {
+  /** wall-local origin: x = 0 centre, y = 0 floor, z = 0 just in front of the wall face (face at z = −0.08) */
   position?: [number, number, number]
-  width?: number
-  height?: number
-  /** concrete backing panel (off when mounted on a brick wall) */
-  panel?: boolean
-  /** soft haze glow behind the tubes (silhouettes the crowd); kept faint and capped */
+  /** ceiling height (conduit runs up to it) */
+  ceilY?: number
+  /** soft haze glow on the wall behind the tubes (silhouettes the crowd); kept faint and capped */
   haze?: boolean
 }
+const WALL_Z = -0.08
+const WALL_TC = 0.03
+/** (v19) kick: the two tubes nearest the centre; offbeat highs: band by distance from the centre; chases: mirrored groups by |x| */
+const WALL_KICK = (() => { const o = WALL_TUBES.map((t, i) => [Math.abs(t.x), i] as const).sort((a, b) => a[0] - b[0]); return [o[0][1], o[1][1]] })()
+const WALL_MAXX = Math.max(...WALL_TUBES.map((t) => Math.abs(t.x)))
+const WALL_BAND = WALL_TUBES.map((t) => Math.min(15, 1 + Math.floor((Math.abs(t.x) / WALL_MAXX) * 6.5)))
+const WALL_GROUP = WALL_TUBES.map((t) => Math.min(3, Math.floor((Math.abs(t.x) / (WALL_MAXX + 0.01)) * 4)))
 
-/** 8 bare vertical tubes; hard-gated spectrum (snappy envelopes), kick slams the centre pair, drops slam all */
-export const TubeWall: React.FC<TubeWallProps> = ({ position = [0, 0, 0], width = 7, height = 3, panel = true, haze = false }) => {
+/** irregular tube wall (see tubes.ts): hard-gated spectrum, kick slams the centre pair, drops slam all */
+export const TubeWall: React.FC<TubeWallProps> = ({ position = [0, 0, 0], ceilY = 3.1, haze = false }) => {
   const root = useRef<Group>(null)
   const hazeMat = useRef<MeshBasicMaterial>(null)
   const hazeTex = useMemo(() => radialTexture(), [])
-  const n = 8
+  const n = WALL_TUBES.length
   const tubes = useRef<InstancedMesh | null>(null)
   const glow = useRef<Mesh>(null)
-  const map = useConcrete(2)
   const env = useEnvelopes(n)
   const tr = useTriggers()
-  const slots = useMemo(() => Array.from({ length: n }, (_, i) => allocHalo(`wall.tube${i}`)), [])
-  const matrices = useMemo(() => Array.from({ length: n }, (_, i) => new Matrix4().setPosition((i - (n - 1) / 2) * (width / n), 0, 0.02)), [width])
+  const slots = useMemo(() => Array.from({ length: n }, (_, i) => allocHalo(`wall.tube${i}`)), [n])
+  const matrices = useMemo(() => WALL_TUBES.map((t) => wallTubeMatrix(t, WALL_TC)), [])
+  const fixtures = useMemo(() => wallFixtures(WALL_TUBES, WALL_Z, WALL_TC, ceilY - position[1]), [ceilY, position[1]])
+  const fixMat = useMemo(() => brushedMetal('#2a2c30', 0.85, 0.25), [])
+  const cableMat = useMemo(() => new MeshStandardMaterial({ color: '#0d0d0e', roughness: 0.55, metalness: 0.1 }), [])
+  useEffect(() => { envOn(fixMat, 0.9, false, true) }, [fixMat])
   useFrame((_, delta) => {
     const G = gate()
     const groove = 1 - beat.breakAmt
     const T = tr.current
     const t = performance.now() / 1000
-    decayAll(env.current, delta, 14)
+    decayAll(env.current, delta, TUBE_DECAY)
     if (beat.kickN !== T.kickN) {
       T.kickN = beat.kickN
-      if (groove > 0.5 && !(beat.riser > 0)) { fire(env.current, 3, 1); fire(env.current, 4, 1) }
+      if (groove > 0.5 && !(beat.riser > 0)) for (const i of WALL_KICK) fire(env.current, i, 1)
     }
     if (beat.step !== T.step) {
       T.step = beat.step
       if (beat.riser > 0) {
-        // aggressive outward chase (mirror pairs), one pair per 16th late in the build
+        // aggressive outward chase (mirrored groups by distance from the centre), one group per 16th late in the build
         const div = beat.riser > 0.6 ? 1 : 2
         if (beat.step % div === 0) {
-          const pair = Math.floor(beat.step / div) % (n / 2)
-          fire(env.current, n / 2 - 1 - pair, 1)
-          fire(env.current, n / 2 + pair, 1)
+          const g = Math.floor(beat.step / div) % 4
+          for (let i = 0; i < n; i++) if (WALL_GROUP[i] === g) fire(env.current, i, 1)
         }
       } else if (groove > 0.5 && beat.step % 4 === 2) {
-        // offbeat: outer tubes hit only when there is energy in the highs → hard gate, no soft fill
-        for (let i = 0; i < n; i++) {
-          const band = Math.min(15, Math.abs(i - (n - 1) / 2) * 2 + 0.5) | 0
-          if ((beat.levels[band] ?? 0) > 0.45 && i !== 3 && i !== 4) fire(env.current, i, 0.9)
-        }
+        // offbeat: outer tubes hit only when there is energy in their band → hard gate, no soft fill
+        for (let i = 0; i < n; i++) if ((beat.levels[WALL_BAND[i]] ?? 0) > 0.45 && !WALL_KICK.includes(i)) fire(env.current, i, 0.9)
       }
     }
     let mxV = 0
     const rg = root.current
     for (let i = 0; i < n; i++) {
       const e = env.current.v[i]
-      const v = Math.min(1, e * e * 1.0 + beat.dropFlash + 0.05 * beat.breakAmt)
+      const v = Math.min(1, e * e + beat.dropFlash + 0.05 * beat.breakAmt)
       meter(`wall${i}`, v)
       const fl = 1 - 0.035 * (0.5 + 0.5 * Math.sin(t * 41 + i * 1.9)) * (0.5 + 0.5 * Math.sin(t * 2.7 + i * 0.7)) - (hash2(Math.floor(t * 11), i + 77) < 0.025 ? 0.15 : 0)
       const [r, g, b] = TINTS[(i * 3 + 1) % TINTS.length]
-      const k = v * G * fl
+      const k = (TUBE_IDLE + v) * G * fl
       mxV = Math.max(mxV, v * G)
       tubes.current?.setColorAt(i, tmpCol.setRGB(PALETTE.cold.r * r * k, PALETTE.cold.g * g * k, PALETTE.cold.b * b * k))
       if (rg) {
-        const x = (i - (n - 1) / 2) * (width / n)
-        rg.localToWorld(_v.set(x, 0, 0.06))
-        rg.localToWorld(_w.set(x, height / 2, 0.06))
+        const W = WALL_TUBES[i]
+        const d = tubeDir(W)
+        rg.localToWorld(_v.set(W.x, W.y, WALL_TC + 0.03))
+        rg.localToWorld(_w.set(W.x + d.x * W.len / 2, W.y + d.y * W.len / 2, WALL_TC + 0.03))
         _ax.subVectors(_w, _v)
-        setHalo(slots[i], _v, _ax, 0.24, 0.6 * k, r, g, b)
+        setHalo(slots[i], _v, _ax, TUBE_HALO_R, TUBE_HALO_I * k, r, g, b)
       }
     }
     if (tubes.current?.instanceColor) tubes.current.instanceColor.needsUpdate = true
     fx.wallGlow = mxV
-    // haze glow: follows the brightest tube, capped low (never a big flash)
+    // haze glow on the wall: follows the brightest tube, capped low (v19: weaker, so the tubes read as lamps, not a glow)
     if (hazeMat.current) {
       let mx = 0
       for (let i = 0; i < n; i++) mx = Math.max(mx, env.current.v[i])
-      hazeMat.current.opacity = G * Math.min(0.2, 0.03 * (1 - beat.breakAmt) + 0.16 * mx * mx + 0.12 * beat.dropFlash + 0.02 * beat.breakAmt)
+      hazeMat.current.opacity = G * Math.min(0.1, 0.015 * (1 - beat.breakAmt) + 0.08 * mx * mx + 0.06 * beat.dropFlash + 0.01 * beat.breakAmt)
     }
     // thin deep-red line at the foot of the wall: kick ambience
     if (glow.current) {
@@ -544,26 +566,20 @@ export const TubeWall: React.FC<TubeWallProps> = ({ position = [0, 0, 0], width 
   })
   return (
     <group position={position} ref={root}>
-      {panel && (
-        <mesh position={[0, 0, -0.08]}>
-          <boxGeometry args={[width + 0.6, height + 0.6, 0.12]} />
-          <meshStandardMaterial map={map} color={PALETTE.concrete} roughness={0.95} />
-        </mesh>
-      )}
       {haze && (
-        <mesh position={[0, 0, 0.06]}>
-          <planeGeometry args={[width * 1.3, height * 1.6]} />
+        <mesh position={[0, 1.55, 0.06]}>
+          <planeGeometry args={[10.5, 3.2]} />
           <meshBasicMaterial ref={hazeMat} color={PALETTE.cold} alphaMap={hazeTex} transparent opacity={0} blending={AdditiveBlending}
             depthWrite={false} toneMapped={false} />
         </mesh>
       )}
       <instancedMesh ref={(m) => { if (m && !m.instanceColor) matrices.forEach((M, i) => { m.setMatrixAt(i, M); m.setColorAt(i, tmpCol.set(0, 0, 0)) }); tubes.current = m }}
-        args={[undefined, undefined, n]} frustumCulled={false}>
-        <cylinderGeometry args={[0.032, 0.032, height, 10]} />
-        <meshBasicMaterial toneMapped={false} />
-      </instancedMesh>
-      <mesh ref={glow} position={[0, -height / 2 - 0.2, 0.02]}>
-        <boxGeometry args={[width, 0.03, 0.03]} />
+        args={[tubeGeometry(), tubeMaterial(), n]} frustumCulled={false} />
+      {/* lampholders / end caps, clips, conduit (one merged mesh) + loose feed cables */}
+      <mesh geometry={fixtures.metal} material={fixMat} />
+      <mesh geometry={fixtures.rubber} material={cableMat} />
+      <mesh ref={glow} position={[0.15, 0.25, 0.0]} rotation={[0, 0, 0.004]}>
+        <boxGeometry args={[8.2, 0.03, 0.03]} />
         <meshBasicMaterial color="#000000" toneMapped={false} />
       </mesh>
     </group>

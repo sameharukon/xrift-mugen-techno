@@ -2,6 +2,7 @@ import { useServerClock } from '@xrift/world-components'
 import { useFrame, useThree } from '@react-three/fiber'
 import { useCallback, useEffect, useRef } from 'react'
 import { Group, MeshBasicMaterial, MeshStandardMaterial, Vector3 } from 'three'
+import { CuboidCollider, RigidBody } from '@react-three/rapier'
 import { BANDS } from '../../techno/engine'
 import { BoothGear } from './Gear'
 import { beat } from '../../techno/beat'
@@ -91,9 +92,16 @@ const FADE_S = 1.0
 
 
 /** dark industrial PA stack: double-18 sub + 2-way top, metal grilles, tiny red kick LED (dark when stopped) */
-function SpeakerStack({ ledRef, edgeRef }: { ledRef: (m: MeshBasicMaterial | null) => void; edgeRef: (m: MeshBasicMaterial | null) => void }) {
+/** v19: deterministic per-stack misalignment (hand-stacked: the top sits a bit off, the sub is pushed slightly askew) */
+const sh = (a: number, b: number) => { let x = (a * 374761393 + b * 668265263) | 0; x = Math.imul(x ^ (x >>> 13), 1274126177); return ((x ^ (x >>> 16)) >>> 0) / 4294967296 }
+function SpeakerStack({ ledRef, edgeRef, seed = 0 }: { ledRef: (m: MeshBasicMaterial | null) => void; edgeRef: (m: MeshBasicMaterial | null) => void; seed?: number }) {
+  const subYaw = (sh(seed, 1) - 0.5) * 0.07, topYaw = (sh(seed, 2) - 0.5) * 0.12, topX = (sh(seed, 3) - 0.5) * 0.07, topZ = (sh(seed, 4) - 0.5) * 0.05
   return (
-    <group>
+    <group rotation={[0, subYaw, 0]}>
+      {/* v19: solid stack (collider from 0.1 m up, see Bounds.tsx) */}
+      <RigidBody type="fixed" colliders={false}>
+        <CuboidCollider args={[0.39, 0.75, 0.35]} position={[0, 0.85, 0]} />
+      </RigidBody>
       {/* sub */}
       <mesh position={[0, 0.42, 0]}>
         <boxGeometry args={[0.78, 0.84, 0.7]} />
@@ -106,7 +114,7 @@ function SpeakerStack({ ledRef, edgeRef }: { ledRef: (m: MeshBasicMaterial | nul
         </mesh>
       ))}
       {/* top cabinet, slightly tilted down to the crowd */}
-      <group position={[0, 1.2, 0.02]} rotation={[0.08, 0, 0]}>
+      <group position={[topX, 1.2, 0.02 + topZ]} rotation={[0.08, topYaw, 0]}>
         <mesh>
           <boxGeometry args={[0.6, 0.72, 0.5]} />
           <meshStandardMaterial color="#2c2c2c" roughness={0.7} metalness={0.2} />
@@ -385,7 +393,7 @@ export const DJBooth: React.FC<DJBoothProps> = ({ position = [0, 0, 0], rotation
       {/* PA stacks (sub + top); their positions drive the spatial PA panners */}
       {pa.map((sp, i) => (
         <group key={i} position={sp.position} rotation={[0, sp.yaw, 0]} ref={(g) => { stackRefs.current[i] = g }}>
-          <SpeakerStack ledRef={(m) => { ledMats.current[i] = m }} edgeRef={(m) => { if (m && !edgeMats.current.includes(m)) edgeMats.current.push(m) }} />
+          <SpeakerStack seed={i + 1} ledRef={(m) => { ledMats.current[i] = m }} edgeRef={(m) => { if (m && !edgeMats.current.includes(m)) edgeMats.current.push(m) }} />
         </group>
       ))}
 

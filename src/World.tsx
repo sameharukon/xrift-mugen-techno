@@ -9,6 +9,7 @@ import { FloorGlow, LightRig, SceneBackground, SceneFog, TubeWall, useConcrete }
 import { Crowd } from './components/Club/Crowd'
 import { Entrance } from './components/Club/Entrance'
 import { Bounds } from './components/Club/Bounds'
+import { ClubRough, CorridorRough } from './components/Club/Rough'
 import { Ceiling } from './components/Club/Props'
 import { brickNormal, brickTexture } from './components/Club/textures'
 import { ClubEnv, ClubFloor, HaloField, HazeLayers } from './components/Club/Fx'
@@ -145,13 +146,15 @@ export const World: React.FC<WorldProps> = ({ position = [0, 0, 0], scale = 1 })
       <DJBooth position={[0, 0, 0]} pa={PA_STACKS} />
       <Crowd />
       {/* back wall tubes behind the crowd → silhouettes */}
-      <TubeWall position={[0, 1.45, zMin + 0.08]} width={width - 1.6} height={2.1} panel={false} haze />
+      <TubeWall position={[0, 0, zMin + 0.08]} ceilY={height} haze />
       {/* low truss above the back of the crowd, beams tilted towards the booth / camera (backlight) */}
       <LightRig position={[0, height - 0.55, zMin + 1.6]} width={width - 2.4} beamLength={3.6} tiltDir={-1} trussLength={width - 0.4} spill={7} spillDistance={3.2} />
       {/* red kick light from booth/truss height behind the DJ (backlights heads & shoulders); only a small, faint pool on the floor */}
       {/* v12: dark env reflections, haze sheets at head height, fake bloom halos */}
       <ClubEnv />
       <HazeLayers width={width - 0.2} zMin={zMin + 0.1} zMax={zMax - 0.3} wallZ={zMin + 0.08} />
+      {/* v19: grime, paint patches / tape, loose cables, clutter */}
+      <ClubRough width={width} zMin={zMin} zMax={zMax} height={height} />
       <FloorGlow position={[0, 0, -1.4]} size={3} distance={4.5} lightHeight={2.5} peak={14} poolMax={0.18} />
       </CullWhileClosed>
       {/* fake-bloom halos (one draw; also used by the entrance lamp, so not culled with the interior) */}
@@ -159,6 +162,7 @@ export const World: React.FC<WorldProps> = ({ position = [0, 0, 0], scale = 1 })
       {import.meta.env.DEV && <DevCamOverride />}
 
       {/* ========== 入口（クラブの外の短い通路と重い鉄扉。扉を開けると音と光が入る） ========== */}
+      <CorridorRough z0={zMax + wall} z1={zMax + wall + ROOM.corridorLength} width={1.9} height={2.55} />
       <Entrance zMax={zMax} wall={wall} roomWidth={width} roomHeight={height} length={ROOM.corridorLength} />
 
       {/* ========== スポーン（扉の前の暗い通路） ========== */}

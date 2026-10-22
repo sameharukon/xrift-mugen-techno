@@ -440,3 +440,54 @@ export const steelNormal = () => once('stN', () => {
   for (let i = 0; i < h.length; i++) h[i] = dents[i] * 0.9 + rust[i] * (fine[i] - 0.5) * 0.5 + rust[i] * 0.08 + peel[i] * 0.03 - scratch[i] * 0.04
   return normalFast(h, N, 2.0)
 })
+
+// ================================================================ v19: grime atlas (multiply decals)
+/**
+ * 2 × 2 atlas, white = no change, darker = darkens what's behind (MultiplyBlending):
+ * [0] damp patch rising from the floor (ragged tide line, mottled), [1] run-off streaks from above (soot / rust drips),
+ * [2] floor stain (spill / oil, dried edge ring), [3] patchy grime / soot. Cell borders fade to white.
+ */
+export const grimeAtlas = () => once('grime', () => {
+  const N = 512, C = 256
+  const d = new Uint8Array(N * N * 4)
+  const nA = fbm(C, [[4, 1], [8, 0.6], [32, 0.35], [64, 0.2]], 9001), nB = fbm(C, [[8, 1], [24, 0.5], [96, 0.3]], 9002)
+  const n1 = (u: number, s: number) => { const x = u * 6 + s; const i = Math.floor(x), f = x - i; const a = Math.sin(i * 127.1 + s * 311.7) * 43758.5453, b = Math.sin((i + 1) * 127.1 + s * 311.7) * 43758.5453; return (a - Math.floor(a)) * (1 - f * f * (3 - 2 * f)) + (b - Math.floor(b)) * f * f * (3 - 2 * f) }
+  const sm = (a: number, b: number, x: number) => { const t = Math.min(1, Math.max(0, (x - a) / (b - a))); return t * t * (3 - 2 * t) }
+  let s = 31; const rnd = () => ((s = (Math.imul(s, 1103515245) + 12345) | 0) >>> 0) / 4294967296
+  const streaks = Array.from({ length: 14 }, () => ({ x: 0.08 + rnd() * 0.84, w: 0.006 + rnd() * 0.02, len: 0.25 + rnd() * 0.7, k: 0.25 + rnd() * 0.45 }))
+  for (let cy = 0; cy < 2; cy++) for (let cx = 0; cx < 2; cx++) {
+    const cell = cy * 2 + cx
+    for (let y = 0; y < C; y++) for (let x = 0; x < C; x++) {
+      const u = (x + 0.5) / C, v = (y + 0.5) / C, i = y * C + x
+      const a = nA[i], b = nB[i]
+      let dark = 0
+      if (cell === 0) {
+        const top = 0.5 + 0.28 * n1(u, 1) + 0.1 * (b - 0.5)
+        const body = sm(top, top - 0.3, v) * (0.55 + 0.45 * a)
+        const tide = Math.exp(-(((v - top) / 0.025) ** 2)) * 0.3
+        dark = (0.5 * body + tide) * sm(0, 0.18, u) * sm(1, 0.82, u)
+      } else if (cell === 1) {
+        for (const st of streaks) {
+          const dx = Math.abs(u - st.x - 0.01 * Math.sin(v * 9 + st.x * 20)) / st.w
+          if (dx < 1) dark += (1 - dx * dx) * st.k * sm(1 - st.len, 1 - st.len * 0.5, v) * (0.6 + 0.4 * a)
+        }
+        dark += 0.35 * sm(0.8, 1, v) * a
+        dark *= sm(0, 0.1, u) * sm(1, 0.9, u)
+      } else if (cell === 2) {
+        const dx = u - 0.5, dy = v - 0.5, r = Math.hypot(dx, dy), ang = Math.atan2(dy, dx)
+        const edge = 0.3 + 0.035 * Math.sin(ang * 2 + 1.3) + 0.02 * Math.sin(ang * 5 + 0.4) + 0.16 * (a - 0.5)
+        dark = sm(edge, edge - 0.22, r) * (0.22 + 0.3 * b) + Math.exp(-(((r - edge) / 0.015) ** 2)) * 0.1 * b
+      } else {
+        const dx = u - 0.5, dy = v - 0.5, r = Math.hypot(dx, dy)
+        dark = sm(0.5, 0.2, r) * sm(0.42, 0.75, a * 0.7 + b * 0.3) * 0.55
+      }
+      const val = Math.max(0.3, 1 - Math.min(0.7, dark * 1.25))
+      const c8 = Math.round(255 * val)
+      d.set([c8, c8, c8, 255], ((cy * C + y) * N + cx * C + x) * 4)
+    }
+  }
+  const t = dataTex(d, N)
+  t.wrapS = t.wrapT = 1001 // ClampToEdgeWrapping
+  t.colorSpace = 'srgb'
+  return t
+})
