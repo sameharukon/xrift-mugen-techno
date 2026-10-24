@@ -5,7 +5,7 @@ import type { Group, Material, Object3D, Texture } from 'three'
 import { envReg } from './components/Club/fx'
 import { club } from './techno/club'
 import { DJBooth, type PAStack } from './components/DJBooth'
-import { BoothFrontTubes, FloorGlow, LightRig, SceneBackground, SceneFog, TubeWall, useConcrete } from './components/Club'
+import { BoothFrontTubes, FloorGlow, LightRig, SceneBackground, SceneFog, SideTubes, TubeWall, useConcrete } from './components/Club'
 import { Crowd } from './components/Club/Crowd'
 import { Entrance } from './components/Club/Entrance'
 import { Bounds } from './components/Club/Bounds'
@@ -151,6 +151,8 @@ export const World: React.FC<WorldProps> = ({ position = [0, 0, 0], scale = 1 })
       <LightRig position={[0, height - 0.55, zMin + 1.6]} width={width - 2.4} trussLength={width - 0.4} spill={7} spillDistance={3.2} />
       {/* v21b: hand-hung ceiling tubes over the floor in front of the booth (steady glow + hits) → people facing the DJ are lit */}
       <BoothFrontTubes ceilY={height} />
+      {/* v23a: tubes on both side walls + downward spots → the sides hit with the music too (front stays strongest) */}
+      <SideTubes width={width} ceilY={height} />
       {/* red kick light from booth/truss height behind the DJ (backlights heads & shoulders); only a small, faint pool on the floor */}
       {/* v12: dark env reflections, haze sheets at head height, fake bloom halos */}
       <ClubEnv />

@@ -127,7 +127,8 @@ export function wallTubeMatrix(t: WallTube, zc: number) {
  * metal: end caps + lampholder blocks to the wall, wrap-around clips on short brackets, conduit up to the ceiling
  * (or across to the neighbour), junction boxes; rubber: a few loose feed cables sagging between holders.
  */
-export function wallFixtures(list: WallTube[], wallZ: number, zc: number, ceilY: number) {
+const BACK_FEED_PAIRS: [number, number][] = [[0, 1], [4, 5], [7, 8], [10, 11], [2, 3]]
+export function wallFixtures(list: WallTube[], wallZ: number, zc: number, ceilY: number, pairs: [number, number][] = BACK_FEED_PAIRS, seed = 0) {
   const metal = new Builder(BRUSH_TILE), rubber = new Builder()
   const up = new Vector3(0, 1, 0)
   const place = (p: Vector3, d: Vector3, rollZ = 0) => {
@@ -136,7 +137,8 @@ export function wallFixtures(list: WallTube[], wallZ: number, zc: number, ceilY:
     return new Matrix4().compose(p, q, new Vector3(1, 1, 1))
   }
   const ends: Vector3[] = []
-  list.forEach((t, i) => {
+  list.forEach((t, i0) => {
+    const i = i0 + seed
     const d = tubeDir(t)
     const c = new Vector3(t.x, t.y, zc)
     const back = zc - wallZ
@@ -171,7 +173,7 @@ export function wallFixtures(list: WallTube[], wallZ: number, zc: number, ceilY:
     }
   })
   // loose cables: a few holders fed sideways from the neighbour, sagging (hand-run, not on a grid)
-  for (const [a, b] of [[0, 1], [4, 5], [7, 8], [10, 11], [2, 3]] as const) {
+  for (const [a, b] of pairs) {
     const A = ends[a], B = ends[b]
     const mid = A.clone().lerp(B, 0.5)
     const sag = 0.12 + 0.18 * h(a, 30) + 0.04 * Math.abs(A.x - B.x)
@@ -264,3 +266,21 @@ export function ceilFixtures(list: CeilTube[], ceilY: number) {
   }
   return { metal: metal.build(), rubber: rubber.build() }
 }
+
+// ---------------------------------------------------------------- side walls (v23a)
+/**
+ * Side-wall tubes, hand-placed between the PA stacks / flight cases / paint patches (world z, y, len, tilt°).
+ * Left wall x = −W/2, right wall x = +W/2; fewer on the right (power run + crate corner), mixed vertical / crooked /
+ * one high horizontal each side.
+ */
+const SIDE_AUTHORED: Record<'L' | 'R', [number, number, number, number][]> = {
+  L: [[-4.3, 1.75, 1.5, 3], [-2.3, 2.2, 1.2, 84], [0.6, 1.6, 2.1, -2], [1.75, 2.05, 0.6, 12], [4.6, 1.7, 1.5, -4]],
+  R: [[-3.4, 1.65, 1.5, -2], [-0.2, 2.25, 1.5, -86], [1.3, 1.5, 1.2, 6], [4.4, 1.75, 2.1, 1]],
+}
+export interface SideTube extends WallTube { side: -1 | 1; z: number }
+/** wall-local x: left wall group is rotated +90° (local x = −world z), right wall −90° (local x = +world z) */
+export const SIDE_TUBES: Record<'L' | 'R', SideTube[]> = {
+  L: SIDE_AUTHORED.L.map(([z, y, len, deg], i) => ({ side: -1, z, x: -z + (h(i, 31) - 0.5) * 0.05, y: y + (h(i, 32) - 0.5) * 0.05, len, tilt: ((deg + (h(i, 33) - 0.5) * 1.5) * Math.PI) / 180 })),
+  R: SIDE_AUTHORED.R.map(([z, y, len, deg], i) => ({ side: 1, z, x: z + (h(i, 41) - 0.5) * 0.05, y: y + (h(i, 42) - 0.5) * 0.05, len, tilt: ((deg + (h(i, 43) - 0.5) * 1.5) * Math.PI) / 180 })),
+}
+export const SIDE_FEED_PAIRS: Record<'L' | 'R', [number, number][]> = { L: [[0, 1], [3, 2]], R: [[2, 1]] }

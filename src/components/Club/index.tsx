@@ -9,7 +9,7 @@ import { allocHalo, envOn, fx, setHalo, TINTS } from './fx'
 import { beat } from '../../techno/beat'
 import { BRUSH_TILE, concreteTexture, radialTexture } from './textures'
 import { metalUV } from './geo'
-import { CEIL_TUBES, ceilFixtures, ceilTubeMatrix, TUBE_DECAY, TUBE_HALO_I, TUBE_HALO_R, TUBE_IDLE, tubeDir, tubeGeometry, tubeMaterial, WALL_TUBES, wallFixtures, wallTubeMatrix } from './tubes'
+import { CEIL_TUBES, ceilFixtures, ceilTubeMatrix, SIDE_FEED_PAIRS, SIDE_TUBES, type SideTube, TUBE_DECAY, TUBE_HALO_I, TUBE_HALO_R, TUBE_IDLE, tubeDir, tubeGeometry, tubeMaterial, WALL_TUBES, wallFixtures, wallTubeMatrix } from './tubes'
 import { brushedMetal } from './metal'
 
 /**
@@ -87,7 +87,7 @@ if (import.meta.env.DEV) (globalThis as Record<string, unknown>).__flashMeter = 
 
 /** shared trigger tracking (one per component instance) */
 function useTriggers() {
-  return useRef({ step: -1, kickN: 0, clapN: 0, half: -1, clapCount: 0 })
+  return useRef({ step: -1, kickN: 0, clapN: 0, half: -1, clapCount: 0, stabOn: false })
 }
 
 // ---------------------------------------------------------------- floor: low red kick slam
@@ -383,6 +383,9 @@ const WALL_KICK = (() => { const o = WALL_TUBES.map((t, i) => [Math.abs(t.x), i]
 const WALL_MAXX = Math.max(...WALL_TUBES.map((t) => Math.abs(t.x)))
 const WALL_BAND = WALL_TUBES.map((t) => Math.min(15, 1 + Math.floor((Math.abs(t.x) / WALL_MAXX) * 6.5)))
 const WALL_GROUP = WALL_TUBES.map((t) => Math.min(3, Math.floor((Math.abs(t.x) / (WALL_MAXX + 0.01)) * 4)))
+/** outer half of the wall (|x| > 1.8) and the outermost tube on each side */
+const WALL_OUTER = WALL_TUBES.flatMap((t, i) => (Math.abs(t.x) > 1.8 ? [i] : []))
+const WALL_EDGE = [WALL_TUBES.reduce((a, t, i) => (t.x < WALL_TUBES[a].x ? i : a), 0), WALL_TUBES.reduce((a, t, i) => (t.x > WALL_TUBES[a].x ? i : a), 0)]
 
 /** irregular tube wall (see tubes.ts): hard-gated spectrum, kick slams the centre pair, drops slam all */
 export const TubeWall: React.FC<TubeWallProps> = ({ position = [0, 0, 0], ceilY = 3.1, haze = false }) => {
@@ -408,8 +411,20 @@ export const TubeWall: React.FC<TubeWallProps> = ({ position = [0, 0, 0], ceilY 
     decayAll(env.current, delta, TUBE_DECAY)
     if (beat.kickN !== T.kickN) {
       T.kickN = beat.kickN
-      if (groove > 0.5 && !(beat.riser > 0)) for (const i of WALL_KICK) fire(env.current, i, 1)
+      if (groove > 0.5 && !(beat.riser > 0)) {
+        for (const i of WALL_KICK) fire(env.current, i, 1)
+        // v23a: + one random outer tube per kick (the edges of the wall hit too, never the same pattern twice)
+        const o = WALL_OUTER[Math.floor(hash2(beat.kickN, 211) * WALL_OUTER.length)]
+        fire(env.current, o, 0.85)
+      }
     }
+    if (beat.clapN !== T.clapN) {
+      T.clapN = beat.clapN
+      // v23a: clap → the outermost tube on one side (alternating), so the corners slam with the strobes
+      if (groove > 0.5 && !(beat.riser > 0)) fire(env.current, WALL_EDGE[T.clapCount++ % 2], 1)
+    }
+    if (beat.stab > 0.5 && !T.stabOn) { for (let i = 0; i < n; i++) if (hash2(beat.step, i + 233) < 0.25) fire(env.current, i, 0.8) }
+    T.stabOn = beat.stab > 0.5
     if (beat.step !== T.step) {
       T.step = beat.step
       if (beat.riser > 0) {
@@ -421,7 +436,12 @@ export const TubeWall: React.FC<TubeWallProps> = ({ position = [0, 0, 0], ceilY 
         }
       } else if (groove > 0.5 && beat.step % 4 === 2) {
         // offbeat: outer tubes hit only when there is energy in their band → hard gate, no soft fill
-        for (let i = 0; i < n; i++) if ((beat.levels[WALL_BAND[i]] ?? 0) > 0.45 && !WALL_KICK.includes(i)) fire(env.current, i, 0.9)
+        // v23a: band energy raises the odds instead of a hard gate → the outer tubes actually hit in the groove
+        for (let i = 0; i < n; i++) {
+          if (WALL_KICK.includes(i)) continue
+          const lv = beat.levels[WALL_BAND[i]] ?? 0
+          if (lv > 0.45 || hash2(beat.step, i + 221) < 0.2 + 0.4 * lv) fire(env.current, i, 0.8 + 0.2 * Math.min(1, lv))
+        }
       }
     }
     let mxV = 0
@@ -562,6 +582,133 @@ export const BoothFrontTubes: React.FC<{ ceilY: number }> = ({ ceilY }) => {
           <primitive object={targets[j]} />
           <spotLight ref={(l) => { lights.current[j] = l }} position={[S.pos[0], ceilY + S.pos[1], S.pos[2]]} target={targets[j]}
             color={PALETTE.cold} angle={FRONT_SPOT_ANGLE} penumbra={0.75} distance={6} decay={2} intensity={0} />
+        </group>
+      ))}
+    </group>
+  )
+}
+
+// ---------------------------------------------------------------- side walls: tubes + downward spots (v23a)
+/** side tubes hit a bit below the front (the truss / booth front stay the most prominent) */
+const SIDE_HIT = 0.85
+/** spot peak (cd) per side spot; front spots peak at FRONT_LIGHT */
+const SIDE_LIGHT = 9
+const SIDE_SPOT_ANGLE = 0.75
+/** 2 spots per side, near the wall under the ceiling, aimed down / inward at the side floor (cone top edge ≈ 80° from vertical) */
+const SIDE_SPOTS: { side: 'L' | 'R'; z: number }[] = [{ side: 'L', z: -3.0 }, { side: 'L', z: 1.8 }, { side: 'R', z: -2.2 }, { side: 'R', z: 2.8 }]
+const SIDE_LIST: SideTube[] = [...SIDE_TUBES.L, ...SIDE_TUBES.R]
+/** chase order: back → front along each wall, both walls together (mirrored sweep) */
+const SIDE_SWEEP = (() => {
+  const by = (L: SideTube[], off: number) => L.map((t, i) => [t.z, i + off] as const).sort((a, b) => a[0] - b[0]).map((q) => q[1])
+  const l = by(SIDE_TUBES.L, 0), r = by(SIDE_TUBES.R, SIDE_TUBES.L.length)
+  return Array.from({ length: Math.max(l.length, r.length) }, (_, k) => [l[Math.min(k, l.length - 1)], r[Math.min(k, r.length - 1)]])
+})()
+
+/**
+ * Hand-mounted tubes on both side walls + four downward spots that throw real light onto the side floor / crowd /
+ * wall. Same envelopes / gate as the rest: dark between hits, kick + offbeat + clap + stab hits picked per tube
+ * (seeded, never a uniform pattern), mirrored back→front sweep in builds, everything slams on the drop.
+ */
+export const SideTubes: React.FC<{ width: number; ceilY: number }> = ({ width, ceilY }) => {
+  const n = SIDE_LIST.length
+  const nl = SIDE_TUBES.L.length
+  const tubes = useRef<InstancedMesh | null>(null)
+  const lights = useRef<(SpotLight | null)[]>([])
+  const env = useEnvelopes(n)
+  const tr = useTriggers()
+  const slots = useMemo(() => Array.from({ length: n }, (_, i) => allocHalo(`side.tube${i}`)), [n])
+  // wall frames: left wall rotated +90° (local +z → +x into the room), right wall −90°
+  const frames = useMemo(() => ({
+    L: new Matrix4().compose(new Vector3(-width / 2 + 0.08, 0, 0), new Quaternion().setFromAxisAngle(new Vector3(0, 1, 0), Math.PI / 2), new Vector3(1, 1, 1)),
+    R: new Matrix4().compose(new Vector3(width / 2 - 0.08, 0, 0), new Quaternion().setFromAxisAngle(new Vector3(0, 1, 0), -Math.PI / 2), new Vector3(1, 1, 1)),
+  }), [width])
+  const matrices = useMemo(() => SIDE_LIST.map((t) => frames[t.side < 0 ? 'L' : 'R'].clone().multiply(wallTubeMatrix(t, WALL_TC))), [frames])
+  const fixtures = useMemo(() => {
+    const f = (['L', 'R'] as const).map((k, j) => { const g = wallFixtures(SIDE_TUBES[k], WALL_Z, WALL_TC, ceilY, SIDE_FEED_PAIRS[k], 40 + j * 20); g.metal.applyMatrix4(frames[k]); g.rubber.applyMatrix4(frames[k]); return g })
+    return { metal: mergeGeometries([f[0].metal, f[1].metal], false)!, rubber: mergeGeometries([f[0].rubber, f[1].rubber], false)! }
+  }, [frames, ceilY])
+  const fixMat = useMemo(() => brushedMetal('#2a2c30', 0.85, 0.25), [])
+  const cableMat = useMemo(() => new MeshStandardMaterial({ color: '#0d0d0e', roughness: 0.55, metalness: 0.1 }), [])
+  const spots = useMemo(() => SIDE_SPOTS.map((S) => {
+    const sx = S.side === 'L' ? -1 : 1
+    const target = new Object3D(); target.position.set(sx * (width / 2 - 2.3), 0, S.z + 0.3)
+    const near = SIDE_LIST.flatMap((t, i) => (t.side === sx && Math.abs(t.z - S.z) < 2.4 ? [i] : []))
+    return { pos: [sx * (width / 2 - 0.35), ceilY - 0.4, S.z] as [number, number, number], target, near }
+  }), [width, ceilY])
+  useEffect(() => { envOn(fixMat, 0.9, false, true) }, [fixMat])
+  const lvlBuf = useMemo(() => new Float32Array(n), [n])
+  useFrame((_, delta) => {
+    const G = gate()
+    const groove = 1 - beat.breakAmt
+    const T = tr.current
+    const t = performance.now() / 1000
+    const E = env.current
+    decayAll(E, delta, TUBE_DECAY)
+    const chaseOn = beat.riser > 0
+    if (beat.kickN !== T.kickN) {
+      T.kickN = beat.kickN
+      // kick: one tube on each wall (seeded pick per kick), so both sides thump with the floor
+      if (groove > 0.5 && !chaseOn) {
+        fire(E, Math.floor(hash2(beat.kickN, 301) * nl), SIDE_HIT)
+        fire(E, nl + Math.floor(hash2(beat.kickN, 302) * (n - nl)), SIDE_HIT)
+      }
+    }
+    if (beat.step !== T.step) {
+      T.step = beat.step
+      if (chaseOn) {
+        const div = beat.riser > 0.6 ? 1 : 2
+        if (beat.step % div === 0) for (const i of SIDE_SWEEP[Math.floor(beat.step / div) % SIDE_SWEEP.length]) fire(E, i, (0.6 + 0.4 * beat.riser) * SIDE_HIT)
+      } else if (groove > 0.5 && beat.step % 4 === 2) {
+        // offbeat: random tubes, more of them when the hats are loud
+        const hats = beat.levels[12] ?? 0
+        for (let i = 0; i < n; i++) if (hash2(beat.step, i + 311) < 0.22 + 0.28 * hats) fire(E, i, SIDE_HIT * (0.85 + 0.15 * hash2(beat.step, i + 312)))
+      }
+    }
+    if (beat.clapN !== T.clapN) {
+      T.clapN = beat.clapN
+      // clap: one whole wall at a time (alternating) — the side "slap" that answers the truss strobes
+      if (groove > 0.5 && !chaseOn) {
+        const side = T.clapCount++ % 2
+        for (let i = 0; i < n; i++) if ((i < nl ? 0 : 1) === side && hash2(beat.clapN, i + 321) < 0.7) fire(E, i, SIDE_HIT)
+      }
+    }
+    if (beat.stab > 0.5 && !T.stabOn) for (let i = 0; i < n; i++) if (hash2(beat.step, i + 331) < 0.3) fire(E, i, 0.75 * SIDE_HIT)
+    T.stabOn = beat.stab > 0.5
+    const lvl = lvlBuf
+    for (let i = 0; i < n; i++) {
+      const e = E.v[i]
+      const v = Math.min(1, e * e + SIDE_HIT * beat.dropFlash)
+      meter(`side${i}`, v)
+      const fl = 1 - 0.035 * (0.5 + 0.5 * Math.sin(t * 39 + i * 2.1)) * (0.5 + 0.5 * Math.sin(t * 2.9 + i * 0.6)) - (hash2(Math.floor(t * 12), i + 341) < 0.025 ? 0.2 : 0)
+      const [r, g, b] = TINTS[(i * 5 + 3) % TINTS.length]
+      const k = (TUBE_IDLE + v) * G * fl
+      lvl[i] = v * G * fl
+      tubes.current?.setColorAt(i, tmpCol.setRGB(PALETTE.cold.r * r * k, PALETTE.cold.g * g * k, PALETTE.cold.b * b * k))
+      _v.setFromMatrixPosition(matrices[i])
+      _ax.set(0, 0.5, 0).applyMatrix4(matrices[i]).sub(_v)
+      _v.x += SIDE_LIST[i].side < 0 ? 0.03 : -0.03
+      setHalo(slots[i], _v, _ax, TUBE_HALO_R, TUBE_HALO_I * k, r, g, b)
+    }
+    if (tubes.current?.instanceColor) tubes.current.instanceColor.needsUpdate = true
+    // spots follow the brightest nearby tube (+ a bit of the second) → real light pops with the glass
+    spots.forEach((S, j) => {
+      let a = 0, b2 = 0
+      for (const i of S.near) { const x = lvl[i]; if (x > a) { b2 = a; a = x } else if (x > b2) b2 = x }
+      const L = lights.current[j]
+      if (L) L.intensity = SIDE_LIGHT * Math.min(1, a + 0.35 * b2)
+    })
+  })
+  return (
+    <group>
+      <instancedMesh ref={(m) => { if (m && !m.instanceColor) matrices.forEach((M, i) => { m.setMatrixAt(i, M); m.setColorAt(i, tmpCol.set(0, 0, 0)) }); tubes.current = m }}
+        args={[tubeGeometry(), tubeMaterial(), n]} frustumCulled={false} />
+      <mesh geometry={fixtures.metal} material={fixMat} />
+      <mesh geometry={fixtures.rubber} material={cableMat} />
+      {spots.map((S, j) => (
+        <group key={j}>
+          <primitive object={S.target} />
+          <spotLight ref={(l) => { lights.current[j] = l }} position={S.pos} target={S.target}
+            color={PALETTE.cold} angle={SIDE_SPOT_ANGLE} penumbra={0.7} distance={6} decay={2} intensity={0} />
         </group>
       ))}
     </group>
