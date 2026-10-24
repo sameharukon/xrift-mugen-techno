@@ -2,7 +2,7 @@ import { useFrame, useThree } from '@react-three/fiber'
 import { useEffect, useMemo, useRef } from 'react'
 import {
   AdditiveBlending, BoxGeometry, type BufferGeometry, Color, CylinderGeometry, Euler, Fog, Group, InstancedMesh, Matrix4, Mesh,
-  MeshBasicMaterial, MeshStandardMaterial, PointLight, Quaternion, Vector3,
+  MeshBasicMaterial, MeshStandardMaterial, Object3D, PointLight, Quaternion, SpotLight, Vector3,
 } from 'three'
 import { mergeGeometries } from 'three/examples/jsm/utils/BufferGeometryUtils.js'
 import { allocHalo, envOn, fx, setHalo, TINTS } from './fx'
@@ -482,23 +482,31 @@ export const TubeWall: React.FC<TubeWallProps> = ({ position = [0, 0, 0], ceilY 
 }
 
 // ---------------------------------------------------------------- booth front: ceiling tubes that light the people facing the DJ
-/** steady level of the booth-front tubes (work lights left on): the floor in front of the booth is never pitch black */
-const FRONT_STEADY = 0.3
-/** hits on top of the steady glow stay moderate (faces, not a strobe) */
-const FRONT_HIT = 0.55
-/** real light from the tubes onto people / floor (two soft points under the two groups) at the steady level; hits scale it up */
-const FRONT_LIGHT = 2.4
+/** tube level on a hit (dark between hits: no constant glow) */
+const FRONT_HIT = 0.85
+/** spot intensity (cd) when a group is fully lit; the spots only exist for the hits */
+const FRONT_LIGHT = 13
+/** halo for these tubes: tight and dimmer than the rig's, so the glow stays on the glass and doesn't read as a lit ceiling */
+const FRONT_HALO_R = 0.1
+const FRONT_HALO_I = 0.45 * TUBE_HALO_I
+/** spot cone: half-angle + aim keep the top edge well below horizontal → nothing reaches the ceiling */
+const FRONT_SPOT_ANGLE = 0.8
+const FRONT_SPOTS: { pos: [number, number, number]; aim: [number, number, number]; group: (z: number) => boolean }[] = [
+  // booth-side spot aims forward/down at the faces of people at z ≈ 1.5–3; second one covers the ones further back
+  { pos: [-0.4, -0.3, 0.9], aim: [-0.4, 0, 2.6], group: (z) => z < 2.2 },
+  { pos: [0.4, -0.3, 2.6], aim: [0.4, 0, 4.3], group: (z) => z >= 2.2 },
+]
 
 /**
- * v21b: five hand-hung tubes above the floor in front of the booth (see CEIL_TUBES) + two soft white point lights,
- * placed slightly booth-side of where people stand so faces / fronts get lit, not only their backs. Steady low glow
- * (with the usual fluorescent shimmer, one tired tube that flickers now and then), offbeat / chase hits on top,
- * blackout before drops like everything else.
+ * v22a: five hand-hung tubes above the floor in front of the booth (see CEIL_TUBES) + two downward spot lights.
+ * Dark between hits: they only fire on offbeat hits, the build-up chase and the drop flash (blackout before drops).
+ * The spots point down/forward (cone edge < 80° from vertical) so people / floor in front of the booth get lit and the
+ * ceiling doesn't. The fluorescent shimmer + the "tired" tube's stutter are multiplicative → only visible during a hit.
  */
 export const BoothFrontTubes: React.FC<{ ceilY: number }> = ({ ceilY }) => {
   const n = CEIL_TUBES.length
   const tubes = useRef<InstancedMesh | null>(null)
-  const lights = useRef<(PointLight | null)[]>([])
+  const lights = useRef<(SpotLight | null)[]>([])
   const env = useEnvelopes(n)
   const tr = useTriggers()
   const slots = useMemo(() => Array.from({ length: n }, (_, i) => allocHalo(`front.tube${i}`)), [n])
@@ -506,6 +514,8 @@ export const BoothFrontTubes: React.FC<{ ceilY: number }> = ({ ceilY }) => {
   const fixtures = useMemo(() => ceilFixtures(CEIL_TUBES, ceilY), [ceilY])
   const fixMat = useMemo(() => brushedMetal('#2a2c30', 0.85, 0.25), [])
   const cableMat = useMemo(() => new MeshStandardMaterial({ color: '#0d0d0e', roughness: 0.55, metalness: 0.1 }), [])
+  const targets = useMemo(() => FRONT_SPOTS.map((S) => { const o = new Object3D(); o.position.set(...S.aim); return o }), [])
+  const groupN = useMemo(() => FRONT_SPOTS.map((S) => CEIL_TUBES.filter((t) => S.group(t.z)).length), [])
   useEffect(() => { envOn(fixMat, 0.9, false, true) }, [fixMat])
   useFrame((_, delta) => {
     const G = gate()
@@ -521,27 +531,25 @@ export const BoothFrontTubes: React.FC<{ ceilY: number }> = ({ ceilY }) => {
         for (let i = 0; i < n; i++) if (hash2(beat.step, i + 61) < 0.35) fire(env.current, i, 0.8)
       }
     }
-    let sum0 = 0, sum1 = 0
+    const sums = [0, 0]
     for (let i = 0; i < n; i++) {
       const e = env.current.v[i]
-      const v = Math.min(1, FRONT_STEADY + FRONT_HIT * e * e + 0.7 * beat.dropFlash)
-      meter(`front${i}`, v - FRONT_STEADY)
-      // shimmer + rare dips; tube 4 is a tired one (dips more often, a short double blink)
-      const tired = i === 4 ? 0.06 : 0.02
-      const fl = 1 - 0.04 * (0.5 + 0.5 * Math.sin(t * 47 + i * 1.3)) * (0.5 + 0.5 * Math.sin(t * 2.3 + i)) - (hash2(Math.floor(t * 13), i + 91) < tired ? 0.35 : 0)
+      const v = Math.min(1, FRONT_HIT * e * e + 0.7 * beat.dropFlash)
+      meter(`front${i}`, v)
+      // shimmer + rare stutter (tube 4 is a tired one); multiplicative, so nothing shows between hits
+      const tired = i === 4 ? 0.12 : 0.02
+      const fl = 1 - 0.04 * (0.5 + 0.5 * Math.sin(t * 47 + i * 1.3)) * (0.5 + 0.5 * Math.sin(t * 2.3 + i)) - (hash2(Math.floor(t * 13), i + 91) < tired ? 0.45 : 0)
       const [r, g, b] = TINTS[(i * 2 + 2) % TINTS.length]
       const k = v * G * fl
-      if (CEIL_TUBES[i].z < 2.2) sum0 += k; else sum1 += k
+      sums[FRONT_SPOTS[0].group(CEIL_TUBES[i].z) ? 0 : 1] += k
       tubes.current?.setColorAt(i, tmpCol.setRGB(PALETTE.cold.r * r * k, PALETTE.cold.g * g * k, PALETTE.cold.b * b * k))
       _v.setFromMatrixPosition(matrices[i])
       _ax.set(0, 0.5, 0).applyMatrix4(matrices[i]).sub(_v) // half the tube along its axis
-      _v.y -= 0.03
-      setHalo(slots[i], _v, _ax, TUBE_HALO_R, TUBE_HALO_I * k, r, g, b)
+      _v.y -= 0.02
+      setHalo(slots[i], _v, _ax, FRONT_HALO_R, FRONT_HALO_I * k, r, g, b)
     }
     if (tubes.current?.instanceColor) tubes.current.instanceColor.needsUpdate = true
-    // light: steady part scales with the steady glow, hits add on top (k is already gated)
-    const lv = [sum0 / 2, sum1 / 3]
-    lights.current.forEach((L, j) => { if (L) L.intensity = (FRONT_LIGHT * lv[j]) / FRONT_STEADY })
+    lights.current.forEach((L, j) => { if (L) L.intensity = (FRONT_LIGHT * Math.min(1, (2 * sums[j]) / groupN[j])) })
   })
   return (
     <group>
@@ -549,9 +557,13 @@ export const BoothFrontTubes: React.FC<{ ceilY: number }> = ({ ceilY }) => {
         args={[tubeGeometry(), tubeMaterial(), n]} frustumCulled={false} />
       <mesh geometry={fixtures.metal} material={fixMat} />
       <mesh geometry={fixtures.rubber} material={cableMat} />
-      {/* booth-side group lights faces of people standing at z ≈ 1.5–3; door-side group the ones further back */}
-      <pointLight ref={(l) => { lights.current[0] = l }} position={[-0.4, ceilY - 0.55, 1.2]} color={PALETTE.cold} distance={5.5} decay={2} intensity={0} />
-      <pointLight ref={(l) => { lights.current[1] = l }} position={[0.4, ceilY - 0.55, 3.1]} color={PALETTE.cold} distance={5.5} decay={2} intensity={0} />
+      {FRONT_SPOTS.map((S, j) => (
+        <group key={j}>
+          <primitive object={targets[j]} />
+          <spotLight ref={(l) => { lights.current[j] = l }} position={[S.pos[0], ceilY + S.pos[1], S.pos[2]]} target={targets[j]}
+            color={PALETTE.cold} angle={FRONT_SPOT_ANGLE} penumbra={0.75} distance={6} decay={2} intensity={0} />
+        </group>
+      ))}
     </group>
   )
 }
