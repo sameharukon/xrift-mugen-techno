@@ -6,7 +6,7 @@
  * - the wall layout: hand-placed, slightly crooked tubes (deterministic), plus their fixtures (end caps / lampholders,
  *   clips, conduit and a few loose sagging cables) as merged geometry
  */
-import { CatmullRomCurve3, Color, CylinderGeometry, ShaderMaterial, TorusGeometry, TubeGeometry, UniformsLib, UniformsUtils, Vector3, Matrix4, Quaternion } from 'three'
+import { CatmullRomCurve3, Color, CylinderGeometry, Euler, ShaderMaterial, TorusGeometry, TubeGeometry, UniformsLib, UniformsUtils, Vector3, Matrix4, Quaternion } from 'three'
 import { Builder, box, cyl, rbox } from './geo'
 import { BRUSH_TILE } from './textures'
 
@@ -176,6 +176,90 @@ export function wallFixtures(list: WallTube[], wallZ: number, zc: number, ceilY:
     const mid = A.clone().lerp(B, 0.5)
     const sag = 0.12 + 0.18 * h(a, 30) + 0.04 * Math.abs(A.x - B.x)
     const pts = [A.clone().setZ(wallZ + 0.03), A.clone().lerp(mid, 0.5).setZ(wallZ + 0.04).add(new Vector3(0, -sag * 0.75, 0)), mid.clone().setZ(wallZ + 0.045).add(new Vector3(0, -sag, 0)), B.clone().lerp(mid, 0.5).setZ(wallZ + 0.04).add(new Vector3(0, -sag * 0.75, 0)), B.clone().setZ(wallZ + 0.03)]
+    rubber.add(new TubeGeometry(new CatmullRomCurve3(pts), 28, 0.006, 6, false))
+  }
+  return { metal: metal.build(), rubber: rubber.build() }
+}
+
+// ---------------------------------------------------------------- booth-front ceiling tubes (v21b)
+export interface CeilTube {
+  /** centre (room frame: x across, z towards the door) */
+  x: number
+  z: number
+  /** ceiling → tube axis (m): small = surface-mounted holders, larger = hung on two wires */
+  drop: number
+  len: number
+  /** plan angle (rad, 0 = along x) and hang angle (rad, one end lower) */
+  yaw: number
+  tilt: number
+}
+/**
+ * Above the floor in front of the booth (where people stand facing the DJ): five tubes put up by hand — mixed lengths,
+ * mixed drops, not parallel, one short surface-mounted one off to the side. Kept clear of the ducts (|x| ≈ 3) and of the
+ * cross pipe at z = 2.0. Lowest glass ≈ 2.6 m.
+ */
+const CEIL_AUTHORED: [number, number, number, number, number, number][] = [
+  // x, z, drop, len, yaw (deg), tilt (deg)
+  [-1.55, 1.25, 0.32, 1.5, 6, 2.5],
+  [0.75, 1.05, 0.18, 1.2, -9, -1],
+  [1.95, 2.95, 0.07, 1.2, 78, 0],
+  [-0.45, 3.35, 0.42, 1.5, -14, 4],
+  [-2.25, 2.6, 0.07, 0.6, 95, 0],
+]
+export const CEIL_TUBES: CeilTube[] = CEIL_AUTHORED.map(([x, z, drop, len, yaw, tilt], i) => ({
+  x: x + (h(i, 41) - 0.5) * 0.06,
+  z: z + (h(i, 42) - 0.5) * 0.06,
+  drop: drop + (h(i, 43) - 0.5) * 0.02,
+  len,
+  yaw: ((yaw + (h(i, 44) - 0.5) * 3) * Math.PI) / 180,
+  tilt: ((tilt + (h(i, 45) - 0.5) * 0.8) * Math.PI) / 180,
+}))
+/** instance matrix (unit cylinder → this tube) */
+export function ceilTubeMatrix(t: CeilTube, ceilY: number, len = t.len) {
+  return new Matrix4().compose(new Vector3(t.x, ceilY - t.drop, t.z), new Quaternion().setFromEuler(new Euler(0, t.yaw, Math.PI / 2 + t.tilt, 'YXZ')), new Vector3(1, len, 1))
+}
+/**
+ * Fixtures: end caps on every tube; surface-mounted tubes get lampholder blocks up into the ceiling, hung tubes get
+ * two wires + a small ceiling plate each (the plates sink 2 mm into the ceiling → no coplanar faces); a few feed
+ * cables sag between neighbouring holders.
+ */
+export function ceilFixtures(list: CeilTube[], ceilY: number) {
+  const metal = new Builder(BRUSH_TILE), rubber = new Builder()
+  const holders: Vector3[] = []
+  list.forEach((t) => {
+    const M = ceilTubeMatrix(t, ceilY, 1)
+    const q = new Quaternion().setFromRotationMatrix(M)
+    for (const s of [-1, 1]) {
+      metal.add(cyl(0.04, 0.04, 0.05, 14), new Matrix4().compose(new Vector3(0, s * (t.len / 2 + 0.025), 0).applyMatrix4(M), q, new Vector3(1, 1, 1)))
+      metal.add(cyl(0.012, 0.012, 0.02, 6), new Matrix4().compose(new Vector3(0, s * (t.len / 2 + 0.06), 0).applyMatrix4(M), q, new Vector3(1, 1, 1))) // pin housing
+      const yawQ = new Quaternion().setFromEuler(new Euler(0, t.yaw, 0))
+      if (t.drop < 0.12) {
+        // lampholder block from the end cap up into the ceiling
+        const e = new Vector3(0, s * (t.len / 2 + 0.025), 0).applyMatrix4(M)
+        const hgt = ceilY + 0.002 - e.y
+        metal.add(rbox(0.05, hgt, 0.06, 0.008), new Matrix4().compose(new Vector3(e.x, e.y + hgt / 2, e.z), yawQ, new Vector3(1, 1, 1)))
+        holders.push(new Vector3(e.x, ceilY - 0.012, e.z))
+      } else {
+        const a = t.len / 2 - (t.len > 1.3 ? 0.2 : 0.15)
+        const w = new Vector3(0, s * a, 0).applyMatrix4(M)
+        const top = ceilY - 0.01, len = top - (w.y + 0.03)
+        metal.add(cyl(0.004, 0.004, len, 4), new Matrix4().makeTranslation(w.x, w.y + 0.03 + len / 2, w.z))
+        metal.add(rbox(0.07, 0.012, 0.07, 0.004), new Matrix4().compose(new Vector3(w.x, ceilY - 0.004, w.z), yawQ, new Vector3(1, 1, 1)))
+        // wrap-around clip where the wire meets the tube
+        const ring = new TorusGeometry(TUBE_R + 0.004, 0.0035, 5, 14, Math.PI)
+        ring.rotateX(Math.PI / 2).rotateY(Math.PI / 2) // upper half-ring (tube-local +x = up)
+        metal.add(ring, new Matrix4().compose(new Vector3(0, s * a, 0).applyMatrix4(M), q, new Vector3(1, 1, 1)))
+        holders.push(new Vector3(w.x, ceilY - 0.012, w.z))
+      }
+    }
+  })
+  // feed cables sagging under the ceiling between a few neighbouring holders (hand-run)
+  for (const [a, b] of [[1, 2], [6, 7], [0, 9]] as const) {
+    const A = holders[a], B = holders[b]
+    if (!A || !B) continue
+    const sag = 0.08 + 0.05 * A.distanceTo(B)
+    const mid = A.clone().lerp(B, 0.5).add(new Vector3(0, -sag, 0))
+    const pts = [A, A.clone().lerp(mid, 0.5).add(new Vector3(0, -sag * 0.3, 0)), mid, B.clone().lerp(mid, 0.5).add(new Vector3(0, -sag * 0.3, 0)), B]
     rubber.add(new TubeGeometry(new CatmullRomCurve3(pts), 28, 0.006, 6, false))
   }
   return { metal: metal.build(), rubber: rubber.build() }

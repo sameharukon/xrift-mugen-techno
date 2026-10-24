@@ -5,7 +5,7 @@ import type { Group, Material, Object3D, Texture } from 'three'
 import { envReg } from './components/Club/fx'
 import { club } from './techno/club'
 import { DJBooth, type PAStack } from './components/DJBooth'
-import { FloorGlow, LightRig, SceneBackground, SceneFog, TubeWall, useConcrete } from './components/Club'
+import { BoothFrontTubes, FloorGlow, LightRig, SceneBackground, SceneFog, TubeWall, useConcrete } from './components/Club'
 import { Crowd } from './components/Club/Crowd'
 import { Entrance } from './components/Club/Entrance'
 import { Bounds } from './components/Club/Bounds'
@@ -147,8 +147,10 @@ export const World: React.FC<WorldProps> = ({ position = [0, 0, 0], scale = 1 })
       <Crowd />
       {/* back wall tubes behind the crowd → silhouettes */}
       <TubeWall position={[0, 0, zMin + 0.08]} ceilY={height} haze />
-      {/* low truss above the back of the crowd, beams tilted towards the booth / camera (backlight) */}
-      <LightRig position={[0, height - 0.55, zMin + 1.6]} width={width - 2.4} beamLength={3.6} tiltDir={-1} trussLength={width - 0.4} spill={7} spillDistance={3.2} />
+      {/* low truss above the back of the crowd: hanging fluorescent tubes + strobes (v21: no moving heads) */}
+      <LightRig position={[0, height - 0.55, zMin + 1.6]} width={width - 2.4} trussLength={width - 0.4} spill={7} spillDistance={3.2} />
+      {/* v21b: hand-hung ceiling tubes over the floor in front of the booth (steady glow + hits) → people facing the DJ are lit */}
+      <BoothFrontTubes ceilY={height} />
       {/* red kick light from booth/truss height behind the DJ (backlights heads & shoulders); only a small, faint pool on the floor */}
       {/* v12: dark env reflections, haze sheets at head height, fake bloom halos */}
       <ClubEnv />

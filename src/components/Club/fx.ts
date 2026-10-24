@@ -1,15 +1,13 @@
 /**
  * v12 shared light-FX state (local, per frame; no sync needed):
- *  - beam world geometry (written by the LightRig, read by the haze sheets and the wet floor)
+ *  - brightest tube / strobe levels (written by the TubeWall / LightRig, read by the env map and the haze sheets)
  *  - fake-bloom halo slots (written by the light sources, drawn by one instanced HaloField)
  *  - dark environment map registry (materials opt in; intensity follows the lighting)
  * All positions are WORLD space.
  */
-import { Vector3, type MeshStandardMaterial, type Texture } from 'three'
+import type { MeshStandardMaterial, Texture, Vector3 } from 'three'
 
-export const MAX_BEAMS = 4
 export const fx = {
-  beams: Array.from({ length: MAX_BEAMS }, () => ({ p: new Vector3(0, -100, 0), d: new Vector3(0, -1, 0), len: 3.6, rad: 0.2, v: 0 })),
   /** brightest back-wall tube (0..1), for the haze near the wall */
   wallGlow: 0,
   /** brightest truss tube / strobe (0..1) */

@@ -29,23 +29,6 @@ export function concreteTexture(): DataTexture {
   return concrete
 }
 
-/** 1×64 vertical alpha ramp for beam cones: bright at the fixture (uv.y=1), fading towards the floor */
-let beamRamp: DataTexture | null = null
-export function beamAlphaTexture(): DataTexture {
-  if (beamRamp) return beamRamp
-  const N = 64
-  const d = new Uint8Array(N * 4)
-  for (let i = 0; i < N; i++) {
-    const v = i / (N - 1)
-    const a = Math.round(255 * (0.08 + 0.92 * Math.pow(v, 1.8)))
-    d.set([a, a, a, 255], i * 4)
-  }
-  beamRamp = new DataTexture(d, 1, N, RGBAFormat)
-  beamRamp.magFilter = LinearFilter
-  beamRamp.needsUpdate = true
-  return beamRamp
-}
-
 /** radial falloff (floor glow pools) */
 let radial: DataTexture | null = null
 export function radialTexture(): DataTexture {
@@ -216,7 +199,7 @@ export const caseRoughness = () => once('caseR', () => {
   return dataTex(d, N)
 })
 export const caseNormal = () => once('caseN', () => normalFrom(fbm(128, [[64, 1], [128, 0.8]], 2024), 128, 1.2))
-/** soft tileable noise for haze sheets / beam dust (R: large, G: fine) */
+/** soft tileable noise for haze sheets / dust (R: large, G: fine) */
 export const hazeNoise = () => once('haze', () => {
   const N = 128
   const a = fbm(N, [[4, 1], [8, 0.6], [16, 0.3]], 555), b = fbm(N, [[16, 1], [32, 0.5]], 666)

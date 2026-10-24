@@ -318,7 +318,7 @@ export const DJBooth: React.FC<DJBoothProps> = ({ position = [0, 0, 0], rotation
         if (e.clap > 0) { beat.clap = 1; beat.clapN++ }
         if (e.perc > 0) beat.perc = Math.min(1, e.perc)
         if (e.bass > 0) beat.bass = Math.max(beat.bass, 0.8)
-        if (e.stab > 0) { beat.stab = Math.min(1, e.stab); beat.stabSwing += 0.12 * Math.min(1, e.stab) }
+        if (e.stab > 0) beat.stab = Math.min(1, e.stab)
         if (e.drop) beat.dropFlash = 1
         brk = e.brk
         riser = e.riser ? Math.max(0.05, e.brkProg) : 0

@@ -25,9 +25,7 @@ export const beat = {
   perc: 0,
   /** bass note level (held, slow decay) → low floor glow */
   bass: 0,
-  /** accumulated beam-angle offset, nudged by every stab / chord / melody note (no hue changes) */
-  stabSwing: 0,
-  /** short accent from a stab */
+  /** short accent from a stab (nudges the truss's low tubes) */
   stab: 0,
   // ---- sections ----
   /** smoothed 0..1: 1 while a break / breakdown is running */
@@ -42,7 +40,7 @@ export const beat = {
   kickHit: 0,
   kickHitAt: -1e9,
   clapN: 0,
-  /** current brightest white hit of the rig (strobes / tubes / beams, 0..1) and red floor level, for the crowd mist */
+  /** current brightest white hit of the rig (strobes / tubes, 0..1) and red floor level, for the crowd mist */
   whiteHit: 0,
   /** rate-limited (≤ 4 Hz) white envelope derived from whiteHit (crowd mist, PA stack edges) */
   whiteEnv: 0,
